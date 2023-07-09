@@ -12,26 +12,34 @@ pub fn build(b: *std.build.Builder) void {
         .target = CrossTarget{
             .cpu_arch = Target.Cpu.Arch.x86_64,
             .os_tag = Target.Os.Tag.uefi,
-            .abi = Target.Abi.msvc,
+            .abi = Target.Abi.none,
         },
-        .optimize = .ReleaseSafe,
+        .optimize = .ReleaseSmall,
     });
-    exe.output_dirname_source = .{ .step = &exe.step, .path = "efi/boot" };
+    // exe.output_dirname_source = .{ .step = &exe.step, .path = "efi/boot" };
 
-    const run_step = std.Build.RunStep.create(b, "uefi-run bootx64");
+    const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
     run_step.addArgs(&.{ "uefi-run" });
     run_step.addArtifactArg(exe);
     run_step.addArgs(&.{ 
         "--", 
+        "-D", "qemu.log",
+        "-d", "mmu",
+        "-s",
+        "-debugcon", "file:uefi_debug.log", "-global", "isa-debugcon.iobase=0x402",
+        "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+        // "-drive if=pflash,format=raw,file=/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
         "-machine", "q35",
         "-no-reboot",
         "-m", "1024M",
         // "-serial", "stdio",
+        "-monitor", "tcp:127.0.0.1:55555,server,nowait",
         "--nographic",
     });
 
     // exe.emit_analysis
     b.installArtifact(exe);
+
     b.default_step.dependOn(&exe.step);
 
     const step = b.step("run", "Runs the executable");
