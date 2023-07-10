@@ -178,6 +178,17 @@ pub fn getIP() usize {
 }
 
 pub fn jumpIP(ip: usize, param: anytype) void {
-    // _ = param;
     asm volatile("push %rax; ret" :: [ip] "{rax}" (ip), [param] "{rcx}" (param));
+}
+
+pub fn sti() callconv(.Inline) void {
+    asm volatile("sti");
+}
+
+pub fn cli() callconv(.Inline) void {
+    asm volatile("cli");
+}
+
+pub fn mask_legacy_pic() callconv(.Inline) void {
+    asm volatile("mov $0xFF, %al; out %al, $0xA1; out %al, $0x21");
 }

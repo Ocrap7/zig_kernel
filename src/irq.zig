@@ -11,17 +11,20 @@ const IDTEntry = packed struct {
     offset_low: u16,
     selector: u16,
     ist: u3 = 0,
+    reserved1: u5 = 0,
     gate_type: GateType = .Interrupt,
+    reserved2: u1 = 0,
     dpl: enum(u2) {
         kernel = 0,
-        user = 3,  
+        user = 3,
     } = .kernel,
     present: bool = false,
     offset_high: u48,
+    reserved3: u32 = 0,
 };
 
 const IDT = struct {
-    entries: [255]IDTEntry = .{ .{ .offset_low = 0, .selector = 0, .offset_high = 0 } } ** 255,
+    entries: [255]IDTEntry = .{.{ .offset_low = 0, .selector = 0, .offset_high = 0 }} ** 255,
 
     pub fn kernelErrorISR(self: *IDT, index: u8, isr: *const fn (*const ISRFrame, u64) callconv(.Interrupt) void) void {
         const isr_val = @intFromPtr(isr);
@@ -33,8 +36,7 @@ const IDT = struct {
         };
     }
 
-    
-     pub fn kernelISR(self: *IDT, index: u8, isr: *const fn (*const ISRFrame) callconv(.Interrupt) void) void {
+    pub fn kernelISR(self: *IDT, index: u8, isr: *const fn (*const ISRFrame) callconv(.Interrupt) void) void {
         const isr_val = @intFromPtr(isr);
         self.entries[index] = .{
             .offset_low = @truncate(isr_val & 0xFFFF),
@@ -46,9 +48,14 @@ const IDT = struct {
 };
 
 var GLOBAL_IDT = IDT{};
+var IDT_DESCRIPTOR: packed struct { size: u16, base: u64 } = .{ .base = 0, .size = 0 };
 
-const ISRFrame = packed struct {
-    
+const ISRFrame = extern struct {
+    instruction_pointer: usize,
+    code_segment: u64,
+    cpu_flags: u64,
+    stack_pointer: usize,
+    stack_segment: u64,
 };
 
 const Apic = struct {
@@ -78,7 +85,7 @@ const Apic = struct {
         InitialCount = 0x380,
         CurrentCount = 0x390,
         DivideConfiguration = 0x3E0,
-    };   
+    };
 
     pub fn read(register: Register, comptime return_ty: type) return_ty {
         const ptr: *return_ty = @ptrFromInt(CONTROL_BASE + @as(usize, @intFromEnum(register)));
@@ -113,19 +120,29 @@ pub const IOApic = struct {
 
     pub const TriggerMode = enum(u1) {
         Edge,
-        Level,  
+        Level,
     };
 
     pub const RedirectionEntry = packed struct {
+        /// The Interrupt vector that will be raised on the specified CPU(s).
         vector: u8,
+        /// How the interrupt will be sent to the CPU(s).
         delivery_mode: DeliveryMode,
+        /// Specify how the Destination field shall be interpreted. 
         destination_mode: DestinationMode,
+        /// If clear, the IRQ is just relaxed and waiting for something to happen (or it has fired and already processed by Local APIC(s)). 
+        /// If set, it means that the IRQ has been sent to the Local APICs but it's still waiting to be delivered.
         delivery_status: bool,
-        polarity: Polarity,
+        /// For ISA IRQs assume Active High unless otherwise specified in Interrupt Source Override descriptors of the MADT or in the MP Tables.
+        polarity: Polarity = .ActiveHigh,
         remoteIRR: u1,
-        trigger_mode: TriggerMode,
+        /// For ISA IRQs assume Edge unless otherwise specified in Interrupt Source Override descriptors of the MADT or in the MP Tables.
+        trigger_mode: TriggerMode = .Edge,
+        // Temporarily disable this IRQ by setting this, and reenable it by clearing.
         masked: bool,
-        unused: u39,              
+        unused: u39 = 0,
+        /// This field is interpreted according to the Destination Format bit. 
+        /// If Physical destination is choosen, then this field is limited to bits 56 - 59 (only 16 CPUs addressable). You put here the APIC ID of the CPU that you want to receive the interrupt.
         destination: u8,
     };
 
@@ -138,63 +155,74 @@ pub const IOApic = struct {
 
     base: usize,
 
+    /// Reads a value from the ioapic register
     pub fn read(self: *IOApic, register: Register, comptime return_ty: type) return_ty {
-        const iosel: *u32 = @ptrFromInt(self.base);
-        const iodata: *u32 = @ptrFromInt(self.base + 0x10);
+        // Volatile is needed on these two ptrs so that the first read isn't optimized out
+        const iosel : *volatile u32 = @ptrFromInt(self.base);
+        const iodata: *volatile u32 = @ptrFromInt(self.base + 0x10);
 
         const offset: u32 = switch (register) {
             .IOAPICID => 0,
             .IOAPICVER => 1,
             .IOAPICARB => 2,
             .Redirection => |i| {
-                var val: [2]u32 = .{0, 0};
+                var values: [2]u32 = .{ 0, 0 };
 
                 iosel.* = 0x10 + i * 2;
-                val[0] = iodata.*;
+                values[0] = iodata.*;
 
                 iosel.* = 0x10 + i * 2 + 1;
-                val[1] = iodata.*;
+                values[1] = iodata.*;
 
-                const value: *return_ty = @ptrCast(@alignCast(&val));
+                log.*.?.writer().print("IOVer {X} {X} {X}\n", .{ 0x10 + i * 2, values[0], values[1] }) catch {};
+
+                const value: *return_ty = @ptrCast(@alignCast(&values));
 
                 return value.*;
-            }
+            },
         };
 
         iosel.* = offset;
-        const iodata_val: *return_ty = @ptrCast(@alignCast(iodata));
+        const iodata_val: *volatile return_ty = @ptrCast(@alignCast(iodata));
         return iodata_val.*;
     }
 
+    /// Write some value to the specified ioapic register
     pub fn write(self: *IOApic, register: Register, value: anytype) void {
-        const iosel: *u32 = @ptrFromInt(self.base);
-        const iodata: *u32 = @ptrFromInt(self.base + 0x10);
+        // Volatile is needed on these two ptrs so that the first write isn't optimized out
+        const iosel: *volatile u32 = @ptrFromInt(self.base);
+        const iodata: *volatile u32 = @ptrFromInt(self.base + 0x10);
 
         const offset: u32 = switch (register) {
             .IOAPICID => 0,
             .IOAPICVER => 1,
             .IOAPICARB => 2,
             .Redirection => |i| {
-                const values: [*]u32 = @ptrCast(@alignCast(&value));
+                const values: [*]const u32 = @ptrCast(@alignCast(&value));
 
                 iosel.* = 0x10 + i * 2;
-                iosel.* = values[0];
+                iodata.* = values[0];
 
                 iosel.* = 0x10 + i * 2 + 1;
-                iosel.* = values[1];
-            }
+                iodata.* = values[1];
+
+
+                log.*.?.writer().print("IOVer {X} {X} {X}\n", .{ 0x10 + i * 2, values[0], values[1] }) catch {};
+
+                return;
+            },
         };
 
         iosel.* = offset;
-        const iodata_val: *@TypeOf(value) = @ptrCast(@alignCast(iodata));
+        const iodata_val: *volatile @TypeOf(value) = @ptrCast(@alignCast(iodata));
         iodata_val.* = value;
     }
 };
 
 fn isr_handler(vector: u8, frame: *const ISRFrame, error_code: ?u64) void {
-    _ = vector;
-    _ = frame;
     _ = error_code;
+
+    log.*.?.writer().print("Interrupt {}: {}\n", .{vector, frame.*}) catch {};
 
     Apic.write(.EOI, @as(u64, 0));
 }
@@ -206,70 +234,106 @@ comptime {
 
 pub fn init(xsdt: *acpi.XSDT) void {
     if (regs.CpuFeatures.get().apic) @panic("CPU does not support APIC");
+
+    regs.cli();
+
+    IDT_DESCRIPTOR.base = @intFromPtr(&GLOBAL_IDT);
+    IDT_DESCRIPTOR.size = 256 * @sizeOf(IDTEntry) - 1;
+
+    asm volatile ("lidt (%rax)" :: [idt] "{rax}" (&IDT_DESCRIPTOR));
+
     Apic.write(.SpuriousVector, @as(packed struct { offset: u8, enable: bool }, .{ .offset = 0xFF, .enable = true }));
+    regs.mask_legacy_pic();
 
-
-    
     var madtn: ?*acpi.MADT = null;
     for (xsdt.entries()) |entry| {
-        // write.print("XSDT Entry: {X} {s}\n", .{entry.signature, entry.signatureStr()}) catch {};
         if (entry.signature == acpi.MADT.SIGNATURE) madtn = @ptrCast(entry);
     }
-    const madt = madtn orelse @panic("no madt");
-    const bin: [*]u8 = @ptrCast(@alignCast(madt));
-    const bins = bin[0x2C..madt.header.length];
-    
-    log.*.?.writer().print("MADT Entry: {} {any} \n", .{madt,bins}) catch {};
+    const madt = madtn.?;
 
+    var apic_id: ?u8 = null;
+    var ioapic_address: ?usize = null;
+
+    const len = madt.length();
     var offset: usize = 0;
-    while (offset < madt.length()) {
+    while (offset < len) {
         const entry = madt.next_entry(offset);
-        log.*.?.writer().print("MADT Entry: {X} {} {}\n", .{@intFromEnum(entry.*), offset, entry.len()}) catch {};
+
+        switch (entry) {
+            .local_apic => |val| {
+                apic_id = val.apic_id;
+                log.*.?.writer().print("LocalApic@{}\n", .{val}) catch {};
+            },
+            .io_apic => |val| {
+                ioapic_address = val.io_apic_address; 
+                log.*.?.writer().print("IOAPIC@{X}\n", .{ val.io_apic_address }) catch {};
+                // break;
+            },
+            else => {}
+        }
+
         offset += entry.len();
     }
 
-    // const madt = xsdt.madt() orelse @panic("No MADT");
-    // _ = madt;
+    var ioapic = IOApic{ .base = ioapic_address.? };
 
-    var ioapic = IOApic{.base = 0x0};
-    _ = ioapic.read(.{.Redirection = 2}, IOApic.RedirectionEntry);
-    
-    init_idt();    
+    ioapic.write(. { .Redirection = 1 }, IOApic.RedirectionEntry{
+        .vector = 0x24,
+        .delivery_mode = .Fixed,
+        .destination_mode = .Physical,
+        .trigger_mode = .Edge,
+        .destination = apic_id.?,
+        .delivery_status = false,
+        .polarity = .ActiveHigh,
+        .masked = true,
+        .remoteIRR = 0,
+    });
+
+    const entry = ioapic.read(.{ .Redirection = 1 }, IOApic.RedirectionEntry);
+    log.*.?.writer().print("IOVer {}\n", .{ entry }) catch {};
+
+    init_idt();
+
+    regs.sti();
+
+    // _ = p;
+    asm volatile("int3");
+    // log.*.?.writer().print("IOVer {}\n", .{ p.* }) catch {};
 }
 
 fn init_idt() void {
-    GLOBAL_IDT.kernelErrorISR(0, isr0);
-    GLOBAL_IDT.kernelErrorISR(1, isr1);
-    GLOBAL_IDT.kernelErrorISR(2, isr2);
-    GLOBAL_IDT.kernelErrorISR(3, isr3);
-    GLOBAL_IDT.kernelErrorISR(4, isr4);
-    GLOBAL_IDT.kernelErrorISR(5, isr5);
-    GLOBAL_IDT.kernelErrorISR(6, isr6);
-    GLOBAL_IDT.kernelErrorISR(7, isr7);
+    GLOBAL_IDT.kernelISR(0, isr0);
+    GLOBAL_IDT.kernelISR(1, isr1);
+    GLOBAL_IDT.kernelISR(2, isr2);
+    GLOBAL_IDT.kernelISR(3, isr3);
+    GLOBAL_IDT.kernelISR(4, isr4);
+    GLOBAL_IDT.kernelISR(5, isr5);
+    GLOBAL_IDT.kernelISR(6, isr6);
+    GLOBAL_IDT.kernelISR(7, isr7);
     GLOBAL_IDT.kernelErrorISR(8, isr8);
-    GLOBAL_IDT.kernelErrorISR(9, isr9);
+    GLOBAL_IDT.kernelISR(9, isr9);
     GLOBAL_IDT.kernelErrorISR(10, isr10);
     GLOBAL_IDT.kernelErrorISR(11, isr11);
     GLOBAL_IDT.kernelErrorISR(12, isr12);
     GLOBAL_IDT.kernelErrorISR(13, isr13);
     GLOBAL_IDT.kernelErrorISR(14, isr14);
-    GLOBAL_IDT.kernelErrorISR(15, isr15);
-    GLOBAL_IDT.kernelErrorISR(16, isr16);
+    GLOBAL_IDT.kernelISR(15, isr15);
+    GLOBAL_IDT.kernelISR(16, isr16);
     GLOBAL_IDT.kernelErrorISR(17, isr17);
-    GLOBAL_IDT.kernelErrorISR(18, isr18);
-    GLOBAL_IDT.kernelErrorISR(19, isr19);
-    GLOBAL_IDT.kernelErrorISR(20, isr20);
-    GLOBAL_IDT.kernelErrorISR(21, isr21);
-    GLOBAL_IDT.kernelErrorISR(22, isr22);
-    GLOBAL_IDT.kernelErrorISR(23, isr23);
-    GLOBAL_IDT.kernelErrorISR(24, isr24);
-    GLOBAL_IDT.kernelErrorISR(25, isr25);
-    GLOBAL_IDT.kernelErrorISR(26, isr26);
-    GLOBAL_IDT.kernelErrorISR(27, isr27);
-    GLOBAL_IDT.kernelErrorISR(28, isr28);
-    GLOBAL_IDT.kernelErrorISR(29, isr29);
+    GLOBAL_IDT.kernelISR(18, isr18);
+    GLOBAL_IDT.kernelISR(19, isr19);
+    GLOBAL_IDT.kernelISR(20, isr20);
+    GLOBAL_IDT.kernelISR(21, isr21);
+    GLOBAL_IDT.kernelISR(22, isr22);
+    GLOBAL_IDT.kernelISR(23, isr23);
+    GLOBAL_IDT.kernelISR(24, isr24);
+    GLOBAL_IDT.kernelISR(25, isr25);
+    GLOBAL_IDT.kernelISR(26, isr26);
+    GLOBAL_IDT.kernelISR(27, isr27);
+    GLOBAL_IDT.kernelISR(28, isr28);
+    GLOBAL_IDT.kernelISR(29, isr29);
     GLOBAL_IDT.kernelErrorISR(30, isr30);
-    GLOBAL_IDT.kernelErrorISR(31, isr31);
+    GLOBAL_IDT.kernelISR(31, isr31);
     GLOBAL_IDT.kernelISR(32, isr32);
     GLOBAL_IDT.kernelISR(33, isr33);
     GLOBAL_IDT.kernelISR(34, isr34);
@@ -496,38 +560,38 @@ fn init_idt() void {
     GLOBAL_IDT.kernelISR(255, isr255);
 }
 
-fn isr0(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(0, frame, error_code); }
-fn isr1(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(1, frame, error_code); }
-fn isr2(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(2, frame, error_code); }
-fn isr3(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(3, frame, error_code); }
-fn isr4(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(4, frame, error_code); }
-fn isr5(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(5, frame, error_code); }
-fn isr6(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(6, frame, error_code); }
-fn isr7(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(7, frame, error_code); }
+fn isr0(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(0, frame, null); }
+fn isr1(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(1, frame, null); }
+fn isr2(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(2, frame, null); }
+fn isr3(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(3, frame, null); }
+fn isr4(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(4, frame, null); }
+fn isr5(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(5, frame, null); }
+fn isr6(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(6, frame, null); }
+fn isr7(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(7, frame, null); }
 fn isr8(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(8, frame, error_code); }
-fn isr9(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(9, frame, error_code); }
+fn isr9(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(9, frame, null); }
 fn isr10(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(10, frame, error_code); }
 fn isr11(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(11, frame, error_code); }
 fn isr12(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(12, frame, error_code); }
 fn isr13(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(13, frame, error_code); }
 fn isr14(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(14, frame, error_code); }
-fn isr15(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(15, frame, error_code); }
-fn isr16(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(16, frame, error_code); }
+fn isr15(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(15, frame, null); }
+fn isr16(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(16, frame, null); }
 fn isr17(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(17, frame, error_code); }
-fn isr18(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(18, frame, error_code); }
-fn isr19(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(19, frame, error_code); }
-fn isr20(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(20, frame, error_code); }
-fn isr21(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(21, frame, error_code); }
-fn isr22(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(22, frame, error_code); }
-fn isr23(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(23, frame, error_code); }
-fn isr24(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(24, frame, error_code); }
-fn isr25(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(25, frame, error_code); }
-fn isr26(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(26, frame, error_code); }
-fn isr27(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(27, frame, error_code); }
-fn isr28(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(28, frame, error_code); }
-fn isr29(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(29, frame, error_code); }
+fn isr18(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(18, frame, null); }
+fn isr19(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(19, frame, null); }
+fn isr20(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(20, frame, null); }
+fn isr21(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(21, frame, null); }
+fn isr22(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(22, frame, null); }
+fn isr23(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(23, frame, null); }
+fn isr24(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(24, frame, null); }
+fn isr25(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(25, frame, null); }
+fn isr26(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(26, frame, null); }
+fn isr27(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(27, frame, null); }
+fn isr28(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(28, frame, null); }
+fn isr29(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(29, frame, null); }
 fn isr30(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(30, frame, error_code); }
-fn isr31(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(31, frame, error_code); }
+fn isr31(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(31, frame, null); }
 fn isr32(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(32, frame, null); }
 fn isr33(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(33, frame, null); }
 fn isr34(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(34, frame, null); }
@@ -752,6 +816,3 @@ fn isr252(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(252, f
 fn isr253(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(253, frame, null); }
 fn isr254(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(254, frame, null); }
 fn isr255(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(255, frame, null); }
-
-
-

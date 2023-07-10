@@ -9,14 +9,20 @@ const l4_index = (virtual >> 39) & 0x1FF;
 
 console.log(`${l4_index.toString(16)}-${l3_index.toString(16)}-${l2_index.toString(16)}-${l1_index.toString(16)}-${offset.toString(16)}`);
 
+const errorCodes = [8, 10, 11, 12, 13, 14, 17, 30]
+
 for (let i = 0; i < 256; i+= 1) {
-  console.log(`GLOBAL_IDT.kernelISR(${i}, isr${i});`)
+  if (errorCodes.includes(i)) {
+    console.log(`GLOBAL_IDT.kernelErrorISR(${i}, isr${i});`)
+  } else {
+    console.log(`GLOBAL_IDT.kernelISR(${i}, isr${i});`)
+  }
 }
 
 for (let i = 0; i < 256; i+= 1) {
-  if (i < 30) {
-    console.log(`fn isr${i}(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(${i}, frame, error_code); }`)
+  if (errorCodes.includes(i)) {
+    console.log(`fn isr${i}(frame: ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(${i}, frame, error_code); }`)
   } else {
-    console.log(`fn isr${i}(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(${i}, frame, null); }`)
+    console.log(`fn isr${i}(frame: ISRFrame) callconv(.Interrupt) void { isr_handler(${i}, frame, null); }`)
   }
 }

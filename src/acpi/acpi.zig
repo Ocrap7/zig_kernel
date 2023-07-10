@@ -57,24 +57,43 @@ pub const FACP = packed struct {
 };
 
 pub const MADT = packed struct {
-    pub const Entry = union(enum(u16)) {
-        local_apic: packed struct { processor_id: u8, apic_id: u8, flags: u32, } = 0x0801,
-        io_apic: packed struct { io_apic_id: u8, reserved: u8, io_apic_address: u32, gsi_base: u32 } = 0x0C01,
-        io_apic_source_override: packed struct { bus: u8, irq: u8, gsi: u32, flags: u16, } = 0x0A02,
-        local_apic_nmi: packed struct { io_apic_id: u8, flags: u16, lint: u8 } = 0x0604,
+    // pub const Entry = packed struct {
+    //     ty: u8,
+    //     len: u8,
+
+    // };
+    pub const EntryTag = enum(u16) {
+        local_apic = 0x0800,
+        io_apic = 0x0C01,
+        io_apic_source_override = 0x0A02,
+        local_apic_nmi = 0x0604,
         _,
+    };
+
+    pub const LocalApic = packed struct { processor_id: u8, apic_id: u8, flags: u32, };
+    pub const IoApic = packed struct { io_apic_id: u8, reserved: u8, io_apic_address: u32, gsi_base: u32 };
+    pub const IoApicSourceOverride = packed struct { bus: u8, irq: u8, gsi: u32, flags: u16, };
+    pub const LocalApicNMI = packed struct { io_apic_id: u8, flags: u16, lint: u8 };
+
+    pub const Entry = union(enum(u8)) {
+        local_apic: LocalApic,
+        io_apic: IoApic,
+        io_apic_source_override: IoApicSourceOverride,
+        local_apic_nmi: LocalApicNMI,
+        count: u8,
 
         pub fn len(self: *const Entry) u8 {
-            // return switch (self.*) {
-            //     .local_apic => |_| 8,
-            //     .io_apic => |_| 12,
-            //     .io_apic_source_override => |_| 12,
-            //     .local_apic_nmi => |_| 6,
-            // };
+            return switch (self.*) {
+                .local_apic => |_| 8,
+                .io_apic => |_| 12,
+                .io_apic_source_override => |_| 10,
+                .local_apic_nmi => |_| 6,
+                .count => |n| n,
+            };
 
-            const i = @intFromEnum(self.*);
-            log.*.?.writer().print("len: {}\n", .{i}) catch {};
-            return @truncate(i & 0xFF);
+            // const i = @intFromEnum(self.*);
+            // log.*.?.writer().print("len: {}\n", .{i}) catch {};
+            // return @truncate(i & 0xFF);
         }
     };
 
@@ -86,22 +105,35 @@ pub const MADT = packed struct {
     pub const SIGNATURE = 0x43495041;
 
     pub fn length(self: *MADT) usize {
-
         return self.header.length - 0x2C;
     }
 
-    pub fn next_entry(self: *MADT, offset: usize) *const Entry {
+    pub fn next_entry(self: *MADT, offset: usize) Entry {
         var array: [*]u8 = @ptrCast(@alignCast(&self.entries_start));
         array += offset;
 
-                var p = Entry{.local_apic = .{.processor_id = 1, .apic_id = 2, .flags = 3, }};
-        const ptr: [*] u8 = @ptrCast(&p);
-        log.*.?.writer().print("Next: {} {} {} {}\n", .{ptr[0], ptr[1], ptr[2], ptr[7]}) catch {};
+        const entry_tag_ptr: *EntryTag = @ptrCast(@alignCast(array));
+        array += 2;
 
-        log.*.?.writer().print("Next: {} {}\n", .{array[0], array[1]}) catch {};
-
-        const entry_ptr: *Entry = @ptrCast(@alignCast(array));
-        return entry_ptr;
+        switch (entry_tag_ptr.*) {
+            .local_apic => { 
+                const ptr: *LocalApic = @ptrCast(@alignCast(array));
+                return .{ .local_apic = ptr.* };
+            },
+            .io_apic => {
+                const ptr: *IoApic = @ptrCast(@alignCast(array));
+                return .{ .io_apic = ptr.* };
+            },
+            .io_apic_source_override => {
+                const ptr: *IoApicSourceOverride = @ptrCast(@alignCast(array));
+                return .{ .io_apic_source_override = ptr.* };
+            },
+            .local_apic_nmi => {
+                const ptr: *LocalApicNMI = @ptrCast(@alignCast(array));
+                return .{ .local_apic_nmi = ptr.* };
+            },
+            else => return .{ .count = @truncate(@intFromEnum(entry_tag_ptr.*) >> 8) }
+        }
     }
 };
 

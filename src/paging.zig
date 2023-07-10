@@ -305,7 +305,7 @@ pub fn mapPages(physical: usize, virtual: usize, count: usize, flags: MappingFla
     while (i < count) {
         switch (mapPage(physical + i * 4096, virtual + i * 4096, flags)) {
             .success => |_| {
-                logger.*.?.writer().print("Mapped {x} {x}\n", .{physical + i * 4096, virtual + i * 4096}) catch {};
+                // logger.*.?.writer().print("Mapped {x} {x}\n", .{physical + i * 4096, virtual + i * 4096}) catch {};
                 // logger.*.?.writer().print("Mapped {}\n", .{i}) catch {};
             },
             else => |err| return err,
