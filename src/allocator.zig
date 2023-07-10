@@ -51,7 +51,7 @@ pub const page_allocator = std.mem.Allocator{
 
 fn next_usable_descriptor() ?usize {
     const map = getMemoryMap()[alloc_page.descriptor + 1..];
-    for (map, alloc_page.descriptor+1..map.len) |desc, i| {
+    for (map, alloc_page.descriptor+1..) |desc, i| {
         switch (desc.type) {
             .BootServicesCode, .BootServicesData, .ConventionalMemory => return i,
             else => {}
