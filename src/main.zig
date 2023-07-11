@@ -53,8 +53,8 @@ fn getLoaderMemoryIndex() ?usize {
 
 const KernelParams = struct {
     rsdt_length: usize,
-    rsdt: *acpi.RSDP,
-    xsdt: *acpi.XSDT,
+    rsdt: *align(1) const acpi.RSDP,
+    xsdt: *align(1) const acpi.XSDT,
 };
 
 pub fn main() uefi.Status {
@@ -62,8 +62,6 @@ pub fn main() uefi.Status {
 
     log.setLogger(.{ .console = con_out });
     const write = log.getLogger().*.?.writer();
-
-    
 
     switch (alloc.initMemoryMap()) {
         .Success => {},
@@ -81,31 +79,23 @@ pub fn main() uefi.Status {
     const loader_code_index = getLoaderMemoryIndex() orelse return .OutOfResources;
     const loader_code = &mem_map[loader_code_index];
 
-    const Rsdp align(1) = packed struct { sig: u64, checksum: u8, oemid: u48, revision: u8, rsdt: u32, length: u32, xsdt: u64 };
+    const Rsdp align(1) = packed struct { sig: u64, checksum: u8, oemid: u48, revision: u8, rsdt: u32, length: u32, xsdt: *const acpi.XSDT };
 
-    var rsdp: ?*Rsdp = null;
+    var rsdp : ?*align(1) Rsdp = null;
 
+    write.print("Hello\n\n", .{}) catch {};
     // Find RSDP
     for (0..uefi.system_table.number_of_table_entries) |i| {
         const table = &uefi.system_table.configuration_table[i];
         if (table.vendor_guid.eql(uefi.tables.ConfigurationTable.acpi_20_table_guid)) {
-            rsdp = @ptrCast(@alignCast(table.vendor_table));
-            // break;
+            rsdp = @ptrCast(table.vendor_table);
+            break;
         }
     }
 
     if (rsdp == null) @panic("RSDP not found");
 
-    const xsdt: *acpi.XSDT = @ptrFromInt(rsdp.?.xsdt);
-    // write.print("{s:<16}: 0x{x:0>16} -> 0x{x:0>16} - {}\n", .{stringFromMemoryType(loader_code.type), loader_code.physical_start, loader_code.physical_start + loader_code.number_of_pages * 4096, loader_code.number_of_pages}) catch {};
-    for (xsdt.entries()) |entry| {
-        write.print("XSDT Entry: {X} {s}\n", .{ entry.signature, entry.signatureStr() }) catch {};
-        if (entry.signature == acpi.MADT.SIGNATURE) write.print("madt \n", .{}) catch {};
-    }
-
-    
-
-    irq.init(xsdt);
+    irq.init(rsdp.?.xsdt);
 
     // const p = @as(?*anyopaque, EfiMain);
 
@@ -131,10 +121,11 @@ pub fn main() uefi.Status {
     const kernel_start_ptr: *const fn (*const KernelParams) callconv(.C) void = kernel_start;
     const kernel_start_address: usize = @intFromPtr(kernel_start_ptr);
     const kernel_start_offset = kernel_start_address - loader_code.physical_start;
+    write.print("Hello222 {X} {X}\n\n", .{rsdp.?.rsdt, @intFromPtr(rsdp.?.xsdt)}) catch {};
     const kernel_params = KernelParams{
         .rsdt_length = rsdp.?.length,
         .rsdt = @ptrFromInt(rsdp.?.rsdt),
-        .xsdt = @ptrFromInt(rsdp.?.xsdt),
+        .xsdt = rsdp.?.xsdt,
     };
 
     regs.jumpIP(config.KERNEL_CODE_VIRTUAL_START + kernel_start_offset, &kernel_params);

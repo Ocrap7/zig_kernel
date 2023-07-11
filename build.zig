@@ -14,10 +14,10 @@ pub fn build(b: *std.build.Builder) void {
             .os_tag = Target.Os.Tag.uefi,
             .abi = Target.Abi.none,
         },
-        .optimize = .ReleaseSmall,
+        .optimize = .Debug,
     });
     // b.addObject(.{});
-    b.verbose_llvm_ir = "out.ir";
+    // b.verbose_llvm_ir = "out.ir";
     // exe.output_dirname_source = .{ .step = &exe.step, .path = "efi/boot" };
 
     const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
@@ -29,7 +29,7 @@ pub fn build(b: *std.build.Builder) void {
         "-d", "int",
         "-s",
         "-debugcon", "file:uefi_debug.log", "-global", "isa-debugcon.iobase=0x402",
-        // "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+        "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
         // "-drive if=pflash,format=raw,file=/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
         "-machine", "q35",
         "-no-reboot",

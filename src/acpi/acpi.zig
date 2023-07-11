@@ -19,14 +19,18 @@ pub const DescriptionHeader = packed struct {
     pub fn as(self: *DescriptionHeader, comptime return_val: type) *return_val {
         return @ptrCast(self);
     }
+
+    pub fn asConst(self: *const DescriptionHeader, comptime return_val: type) *const return_val {
+        return @ptrCast(self);
+    }
 };
 
 pub const RSDP = packed struct {
     header: DescriptionHeader,
     entries_start: usize,
 
-    pub fn entries(self: *RSDP) []u32 {
-        const array: [*]u32 = @ptrCast(&self.entries_start);
+    pub fn entries(self: *align(1) const RSDP) []align(1) const u32 {
+        const array: [*]align(1) const u32 = @ptrCast(&self.entries_start);
         return array[0..(self.header.length - @sizeOf(DescriptionHeader)) / @sizeOf(u32)];
     }
 };
@@ -35,17 +39,17 @@ pub const XSDT = packed struct {
     header: DescriptionHeader,
     entries_start: usize,
 
-    pub fn entries(self: *XSDT) []*DescriptionHeader {
-        const array: [*]*DescriptionHeader = @ptrCast(@alignCast(&self.entries_start));
+    pub fn entries(self: *align(1) const XSDT) []const align(1)*DescriptionHeader {
+        const array: [*]const align(1)*DescriptionHeader = @ptrCast(&self.entries_start);
         return array[0..(self.header.length - @sizeOf(DescriptionHeader)) / @sizeOf(u64)];
     }
 
-    pub fn madt(self: *XSDT) ?*MADT {
-        var madts: ?*MADT = null;
+    pub fn madt(self: *align(1) const XSDT) ?*const MADT {
         for (self.entries()) |entry| {
-            if (entry.signature == MADT.SIGNATURE) madts = entry.as(MADT);
+            if (entry.signature == MADT.SIGNATURE)
+                return entry.asConst(MADT);
         }
-        return madts;
+        return null;
     }
 };
 
@@ -104,32 +108,32 @@ pub const MADT = packed struct {
 
     pub const SIGNATURE = 0x43495041;
 
-    pub fn length(self: *MADT) usize {
+    pub fn length(self: *const MADT) usize {
         return self.header.length - 0x2C;
     }
 
-    pub fn next_entry(self: *MADT, offset: usize) Entry {
-        var array: [*]u8 = @ptrCast(@alignCast(&self.entries_start));
+    pub fn next_entry(self: *const MADT, offset: usize) Entry {
+        var array: [*]const u8 = @ptrCast(&self.entries_start);
         array += offset;
 
-        const entry_tag_ptr: *EntryTag = @ptrCast(@alignCast(array));
+        const entry_tag_ptr: *align(1) const EntryTag = @ptrCast(array);
         array += 2;
 
         switch (entry_tag_ptr.*) {
             .local_apic => { 
-                const ptr: *LocalApic = @ptrCast(@alignCast(array));
+                const ptr: *align(1) const LocalApic = @ptrCast(array);
                 return .{ .local_apic = ptr.* };
             },
             .io_apic => {
-                const ptr: *IoApic = @ptrCast(@alignCast(array));
+                const ptr: *align(1) const IoApic = @ptrCast(array);
                 return .{ .io_apic = ptr.* };
             },
             .io_apic_source_override => {
-                const ptr: *IoApicSourceOverride = @ptrCast(@alignCast(array));
+                const ptr: *align(1) const IoApicSourceOverride = @ptrCast(array);
                 return .{ .io_apic_source_override = ptr.* };
             },
             .local_apic_nmi => {
-                const ptr: *LocalApicNMI = @ptrCast(@alignCast(array));
+                const ptr: *align(1) const LocalApicNMI = @ptrCast(array);
                 return .{ .local_apic_nmi = ptr.* };
             },
             else => return .{ .count = @truncate(@intFromEnum(entry_tag_ptr.*) >> 8) }

@@ -190,5 +190,5 @@ pub fn cli() callconv(.Inline) void {
 }
 
 pub fn mask_legacy_pic() callconv(.Inline) void {
-    asm volatile("mov $0xFF, %al; out %al, $0xA1; out %al, $0x21");
+    asm volatile("out %al, $0xA1; out %al, $0x21" :: [mask] "{al}" (0xFF));
 }

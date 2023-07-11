@@ -1,6 +1,7 @@
 const regs = @import("./registers.zig");
 const acpi = @import("./acpi/acpi.zig");
 const log = @import("./logger.zig").getLogger();
+const paging = @import("./paging.zig");
 
 const GateType = enum(u4) {
     Interrupt = 0xE,
@@ -23,8 +24,8 @@ const IDTEntry = packed struct {
     reserved3: u32 = 0,
 };
 
-const IDT = struct {
-    entries: [255]IDTEntry = .{.{ .offset_low = 0, .selector = 0, .offset_high = 0 }} ** 255,
+const IDT align(16) = struct {
+    entries: [256]IDTEntry = .{.{ .offset_low = 0, .selector = 0, .offset_high = 0 }} ** 256,
 
     pub fn kernelErrorISR(self: *IDT, index: u8, isr: *const fn (*const ISRFrame, u64) callconv(.Interrupt) void) void {
         const isr_val = @intFromPtr(isr);
@@ -127,15 +128,15 @@ pub const IOApic = struct {
         /// The Interrupt vector that will be raised on the specified CPU(s).
         vector: u8,
         /// How the interrupt will be sent to the CPU(s).
-        delivery_mode: DeliveryMode,
+        delivery_mode: DeliveryMode = .Fixed,
         /// Specify how the Destination field shall be interpreted. 
-        destination_mode: DestinationMode,
+        destination_mode: DestinationMode = .Physical,
         /// If clear, the IRQ is just relaxed and waiting for something to happen (or it has fired and already processed by Local APIC(s)). 
         /// If set, it means that the IRQ has been sent to the Local APICs but it's still waiting to be delivered.
-        delivery_status: bool,
+        delivery_status: bool = false,
         /// For ISA IRQs assume Active High unless otherwise specified in Interrupt Source Override descriptors of the MADT or in the MP Tables.
         polarity: Polarity = .ActiveHigh,
-        remoteIRR: u1,
+        remoteIRR: u1  = 0,
         /// For ISA IRQs assume Edge unless otherwise specified in Interrupt Source Override descriptors of the MADT or in the MP Tables.
         trigger_mode: TriggerMode = .Edge,
         // Temporarily disable this IRQ by setting this, and reenable it by clearing.
@@ -174,8 +175,6 @@ pub const IOApic = struct {
                 iosel.* = 0x10 + i * 2 + 1;
                 values[1] = iodata.*;
 
-                log.*.?.writer().print("IOVer {X} {X} {X}\n", .{ 0x10 + i * 2, values[0], values[1] }) catch {};
-
                 const value: *return_ty = @ptrCast(@alignCast(&values));
 
                 return value.*;
@@ -206,9 +205,6 @@ pub const IOApic = struct {
                 iosel.* = 0x10 + i * 2 + 1;
                 iodata.* = values[1];
 
-
-                log.*.?.writer().print("IOVer {X} {X} {X}\n", .{ 0x10 + i * 2, values[0], values[1] }) catch {};
-
                 return;
             },
         };
@@ -221,18 +217,15 @@ pub const IOApic = struct {
 
 fn isr_handler(vector: u8, frame: *const ISRFrame, error_code: ?u64) void {
     _ = error_code;
+    regs.cli();
 
-    log.*.?.writer().print("Interrupt {}: {}\n", .{vector, frame.*}) catch {};
+    log.*.?.writer().print("Interrupt {}: {X}\n", .{vector, @intFromPtr(&frame)}) catch {};
 
-    Apic.write(.EOI, @as(u64, 0));
+    Apic.write(.EOI, @as(u32, 0));
+    regs.sti();
 }
 
-comptime {
-    // @compileLog(@typeInfo(acpi.MADT).Struct.fields.);
-    // @compileLog(@offsetOf(acpi.MADT, "entries_start"));
-}
-
-pub fn init(xsdt: *acpi.XSDT) void {
+pub fn init(xsdt: *const acpi.XSDT) void {
     if (regs.CpuFeatures.get().apic) @panic("CPU does not support APIC");
 
     regs.cli();
@@ -240,16 +233,10 @@ pub fn init(xsdt: *acpi.XSDT) void {
     IDT_DESCRIPTOR.base = @intFromPtr(&GLOBAL_IDT);
     IDT_DESCRIPTOR.size = 256 * @sizeOf(IDTEntry) - 1;
 
-    asm volatile ("lidt (%rax)" :: [idt] "{rax}" (&IDT_DESCRIPTOR));
-
     Apic.write(.SpuriousVector, @as(packed struct { offset: u8, enable: bool }, .{ .offset = 0xFF, .enable = true }));
     regs.mask_legacy_pic();
 
-    var madtn: ?*acpi.MADT = null;
-    for (xsdt.entries()) |entry| {
-        if (entry.signature == acpi.MADT.SIGNATURE) madtn = @ptrCast(entry);
-    }
-    const madt = madtn.?;
+    const madt = xsdt.madt() orelse @panic("fskldf");
 
     var apic_id: ?u8 = null;
     var ioapic_address: ?usize = null;
@@ -277,28 +264,29 @@ pub fn init(xsdt: *acpi.XSDT) void {
 
     var ioapic = IOApic{ .base = ioapic_address.? };
 
-    ioapic.write(. { .Redirection = 1 }, IOApic.RedirectionEntry{
-        .vector = 0x24,
-        .delivery_mode = .Fixed,
-        .destination_mode = .Physical,
-        .trigger_mode = .Edge,
+    ioapic.write(. { .Redirection = 0 }, IOApic.RedirectionEntry{
+        .vector = 0x20,
         .destination = apic_id.?,
-        .delivery_status = false,
-        .polarity = .ActiveHigh,
-        .masked = true,
-        .remoteIRR = 0,
+        .masked = false,
     });
 
-    const entry = ioapic.read(.{ .Redirection = 1 }, IOApic.RedirectionEntry);
-    log.*.?.writer().print("IOVer {}\n", .{ entry }) catch {};
+    ioapic.write(. { .Redirection = 7 }, IOApic.RedirectionEntry{
+        .vector = 0x27,
+        .destination = apic_id.?,
+        .masked = false,
+    });
 
+    
     init_idt();
+    asm volatile ("lidt (%[idtr])" :: [idtr] "r" (@intFromPtr(&IDT_DESCRIPTOR)));
+
+    Apic.write(.LVTTimer, @as(u32, 32 | 0x20000));
+    Apic.write(.DivideConfiguration, @as(u32, 0x3));
+    Apic.write(.InitialCount, @as(u32, 30000));
 
     regs.sti();
 
-    // _ = p;
-    asm volatile("int3");
-    // log.*.?.writer().print("IOVer {}\n", .{ p.* }) catch {};
+    // asm volatile("int3");
 }
 
 fn init_idt() void {
