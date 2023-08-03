@@ -257,28 +257,48 @@ const ICW4_BUF_SLAVE: u8 = 0x08;
 const ICW4_BUF_MASTER: u8 = 0x0C;
 const ICW4_SFNM: u8	= 0x10;	
 	
-pub fn init(xsdt: *const acpi.XSDT) void {
+pub fn init(xsdt: *align(1) const acpi.XSDT) void {
     _ = xsdt;
     // regs.out(23, @as(u8, 45));
     // _ = regs.in(23, u8);
     // const a1 = regs.in(PIC)
-    _ = asm ("in %[ret], %[reg]" : [ret] "=r" (-> u32) : [reg] "n" (4));
-    const a1: u32 = regs.in(4, u32);                        // save masks
-    _ = a1;
+    regs.cli();
+    // _ = asm ("in %[ret], %[reg]" : [ret] "=r" (-> u32) : [reg] "n" (4));
+    const a1 = regs.in(PIC1_DATA, u8);
+    const a2 = regs.in(PIC2_DATA, u8);                        // save masks
 	// const a2: u8 = regs.in(PIC2_DATA, u8);
  
 	regs.out(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);  // starts the initialization sequence (in cascade mode)
+    regs.wait();
 	regs.out(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
-	regs.out(PIC1_DATA, 0x20);                 // ICW2: Master PIC vector offset
-	regs.out(PIC2_DATA, 0x30);                 // ICW2: Slave PIC vector offset
-	regs.out(PIC1_DATA, 4);                       // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
-	regs.out(PIC2_DATA, 2);                       // ICW3: tell Slave PIC its cascade identity (0000 0010)
+    regs.wait();
+
+	regs.out(PIC1_DATA, @as(u8, 0x20));                 // ICW2: Master PIC vector offset
+    regs.wait();
+	regs.out(PIC2_DATA, @as(u8, 0x28));                 // ICW2: Slave PIC vector offset
+    regs.wait();
+
+	regs.out(PIC1_DATA, @as(u8, 4));                       // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
+    regs.wait();
+	regs.out(PIC2_DATA, @as(u8, 2));                       // ICW3: tell Slave PIC its cascade identity (0000 0010)
+    regs.wait();
  
 	regs.out(PIC1_DATA, ICW4_8086);               // ICW4: have the PICs use 8086 mode (and not 8080 mode)
+    regs.wait();
 	regs.out(PIC2_DATA, ICW4_8086);
+    regs.wait();
  
-	// regs.out(PIC1_DATA, a1);   // restore saved masks.
-	// regs.out(PIC2_DATA, a2);
+	regs.out(PIC1_DATA, a1);   // restore saved masks.
+    regs.wait();
+	regs.out(PIC2_DATA, a2);
+    regs.wait();
+
+
+    IDT_DESCRIPTOR.base = @intFromPtr(&GLOBAL_IDT);
+    IDT_DESCRIPTOR.size = 256 * @sizeOf(IDTEntry) - 1;
+    
+    init_idt();
+    asm volatile ("lidt (%[idtr])" :: [idtr] "r" (@intFromPtr(&IDT_DESCRIPTOR)));
 }
 
 pub fn init2(xsdt: *const acpi.XSDT) void {
@@ -358,7 +378,7 @@ pub fn init2(xsdt: *const acpi.XSDT) void {
     asm volatile ("lidt (%[idtr])" :: [idtr] "r" (@intFromPtr(&IDT_DESCRIPTOR)));
 
 
-    // asm volatile("int3");
+    asm volatile("int3");
 }
 
 fn init_idt() void {

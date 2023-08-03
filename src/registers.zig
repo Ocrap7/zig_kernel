@@ -193,6 +193,10 @@ pub fn mask_legacy_pic() callconv(.Inline) void {
     asm volatile("outb %[mask], $0xA1; outb %[mask], $0x21" :: [mask] "{al}" (@as(u8, 0xFF)));
 }
 
+pub fn wait() void {
+    out(0x80, @as(u8, 0));
+}
+
 pub fn out(comptime port: u16, value: anytype) callconv(.Inline) void {
     switch (@sizeOf(@TypeOf(value))) {
         1 => asm volatile("outb %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
@@ -204,5 +208,15 @@ pub fn out(comptime port: u16, value: anytype) callconv(.Inline) void {
 }
 
 pub fn in(comptime port: u16, comptime ty: type) ty {
-    return asm("in %[ret], %[reg]" : [ret] "=r" (-> ty) : [reg] "n" (port));
+    switch (@sizeOf(ty)) {
+        1 => return asm("inb %[reg], %[ret]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
+        2 => return asm("inw %[reg], %[ret]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
+        // 4 => return asm("ind %[ret], %[reg]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
+        // 8 => return asm("inq %[ret], %[reg]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
+        else => @compileError("Unexpected type size")
+    }
+}
+
+pub fn flush_tlb() void {
+    asm volatile("mov %cr3, %rax; mov %rax, %cr3");
 }

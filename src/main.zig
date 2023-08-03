@@ -8,8 +8,11 @@ const alloc = @import("./allocator.zig");
 const acpi = @import("./acpi/acpi.zig");
 const irq = @import("./irq.zig");
 const config = @import("./config.zig");
+const kernel = @import("./kernel.zig");
 
 pub export const _fltused: i32 = 0;
+
+const KERNEL_CODE = @embedFile("kernel");
 
 fn stringFromMemoryType(mem_type: uefi.tables.MemoryType) []const u8 {
     const str = switch (mem_type) {
@@ -52,14 +55,7 @@ fn getLoaderMemoryIndex() ?usize {
     return null;
 }
 
-const KernelParams = struct {
-    rsdt_length: usize,
-    rsdt: *align(1) const acpi.RSDP,
-    xsdt: *align(1) const acpi.XSDT,
-};
-
 pub fn main() uefi.Status {
-
     regs.cli();
     regs.mask_legacy_pic();
 
@@ -78,17 +74,17 @@ pub fn main() uefi.Status {
         },
     }
 
-    const mem_map = alloc.getMemoryMap();
+    // const mem_map = alloc.getMemoryMap();
     // for (mem_map) |desc| {
     //     write.print("{s:<16} {x:>8}: 0x{x:0>16} -> 0x{x:0>16} - {}\n", .{stringFromMemoryType(desc.type), @intFromEnum(desc.type), desc.physical_start, desc.physical_start + desc.number_of_pages * 4096, desc.number_of_pages}) catch {};
     // }
 
-    const loader_code_index = getLoaderMemoryIndex() orelse return .OutOfResources;
-    const loader_code = &mem_map[loader_code_index];
+    // const loader_code_index = getLoaderMemoryIndex() orelse return .OutOfResources;
+    // const loader_code = &mem_map[loader_code_index];
 
     const Rsdp align(1) = packed struct { sig: u64, checksum: u8, oemid: u48, revision: u8, rsdt: u32, length: u32, xsdt: *const acpi.XSDT };
 
-    var rsdp : ?*align(1) Rsdp = null;
+    var rsdp: ?*align(1) Rsdp = null;
 
     // Find RSDP
     for (0..uefi.system_table.number_of_table_entries) |i| {
@@ -103,8 +99,6 @@ pub fn main() uefi.Status {
 
     irq.init(rsdp.?.xsdt);
 
-    // asm volatile ("1: jmp 1b");
-
     // Let's us map page tables
     var cr0 = regs.CR0.get();
     cr0.write_protect = false;
@@ -112,42 +106,53 @@ pub fn main() uefi.Status {
 
     paging.PageTable.setRecursiveEntry();
 
-    switch (paging.mapPages(loader_code.physical_start, config.KERNEL_CODE_VIRTUAL_START, loader_code.number_of_pages, .{})) {
-        .success => |_| {},
-        else => |err| {
-            write.print("Error mapping kernel: {}\n", .{err}) catch {};
-            return .OutOfResources;
-        },
-    }
+    // switch (paging.mapPages(loader_code.physical_start, config.KERNEL_CODE_VIRTUAL_START, loader_code.number_of_pages, .{})) {
+    //     .success => |_| {},
+    //     else => |err| {
+    //         write.print("Error mapping kernel: {}\n", .{err}) catch {};
+    //         return .OutOfResources;
+    //     },
+    // }
 
-    const kernel_start_ptr: *const fn (*const KernelParams) callconv(.C) void = kernel_start;
-    const kernel_start_address: usize = @intFromPtr(kernel_start_ptr);
-    const kernel_start_offset = kernel_start_address - loader_code.physical_start;
-    const kernel_params = KernelParams{
+    // var fbs = std.io.fixedBufferStream(KERNEL_CODE);
+    var fbs = std.io.FixedBufferStream([]const u8){ .buffer = KERNEL_CODE, .pos = 0 };
+
+    // const src: *align(8) const [64]u8 = @ptrCast(&KERNEL_CODE);
+    const headers = std.elf.Header.read(&fbs) catch { @panic("poo"); };
+    var iter = headers.program_header_iterator(&fbs);
+
+    while (iter.next() catch { @panic("uh-oh"); }) |header| {
+        // write.print("Error in memory init: {any}\n", .{header}) catch {};
+        switch (header.p_type) {
+            std.elf.PT_LOAD => {
+                // var memory = alloc.page_allocator.alloc(u8, header.p_memsz) catch { @panic("Unable to allocate kernel memory"); };
+                const exe = header.p_flags & std.elf.PF_X > 0;
+                _ = exe;
+                const flag_write = header.p_flags & std.elf.PF_W > 0;
+                switch (paging.mapPages(@intFromPtr(&KERNEL_CODE[header.p_offset]), header.p_vaddr, header.p_memsz / 4097 + 1, .{ .writable = flag_write })) {
+                    .success => |_| { write.print("Mapped good {x} - {} {}\n", .{header.p_vaddr, header.p_memsz, flag_write}) catch {};},
+                    else => |err| {
+                        write.print("Error mapping kernel: {}\n", .{err}) catch {};
+                        return .OutOfResources;
+                    },
+                }
+            },
+            else => {}
+        }
+    }
+    // const kernel_start_ptr: *const fn (*const kernel.KernelParams) callconv(.C) void = kernel_start;
+    // const kernel_start_address: usize = @intFromPtr(kernel_start_ptr);
+    // const kernel_start_offset = kernel_start_address - loader_code.physical_start;
+    const kernel_params = kernel.KernelParams{
         .rsdt_length = rsdp.?.length,
         .rsdt = @ptrFromInt(rsdp.?.rsdt),
         .xsdt = rsdp.?.xsdt,
     };
 
-    regs.jumpIP(config.KERNEL_CODE_VIRTUAL_START + kernel_start_offset, &kernel_params);
+    regs.jumpIP(headers.entry, &kernel_params);
+
+    while (true) {}
+
 
     return .Success;
-}
-
-fn kernel_start(params: *const KernelParams) callconv(.C) void {
-    const write = log.getLogger().*.?.writer();
-
-    write.print("Hello Kernel {} {*} {X}\n", .{ params.rsdt, params.xsdt, regs.getIP() }) catch {};
-    for (params.rsdt.entries()) |entry| {
-        write.print("RSDT Entry: {X:0>8}\n", .{entry}) catch {};
-    }
-
-    for (params.xsdt.entries()) |entry| {
-        write.print("XSDT Entry: {X} {s}\n", .{ entry.signature, entry.signatureStr() }) catch {};
-    }
-
-    // regs.sti();
-
-    while (true) { }
-    // }
 }

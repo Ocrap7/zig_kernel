@@ -1,4 +1,5 @@
 const logger = @import("./logger.zig").getLogger();
+const regs = @import("./registers.zig");
 const alloc = @import("./allocator.zig");
 const assert = @import("std").debug.assert;
 
@@ -25,6 +26,10 @@ pub const MappingFlags = packed struct {
 
     os: u3 = 0,
 };
+
+comptime {
+    assert(@bitSizeOf(MappingFlags) == 12);
+}
 
 pub const PageTableEntry = packed struct {
     flags: MappingFlags = .{},
@@ -307,6 +312,8 @@ pub fn mapPages(physical: usize, virtual: usize, count: usize, flags: MappingFla
             .success => |_| {
                 // logger.*.?.writer().print("Mapped {x} {x}\n", .{physical + i * 4096, virtual + i * 4096}) catch {};
                 // logger.*.?.writer().print("Mapped {}\n", .{i}) catch {};
+
+                regs.flush_tlb();
             },
             else => |err| return err,
         }

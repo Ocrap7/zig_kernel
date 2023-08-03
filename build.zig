@@ -6,6 +6,36 @@ const Target = @import("std").Target;
 // declaratively construct a build graph that will be executed by an external
 // runner.
 pub fn build(b: *std.build.Builder) void {
+    
+    const kernel_exe = b.addExecutable(.{
+        .name = "kernel",
+        .root_source_file = .{ .path = "src/kernel.zig" },
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .freestanding,
+            .abi = .none,
+        },
+        .optimize = .Debug,
+    });
+    kernel_exe.linker_script = .{ .path = "link.ld" };
+    kernel_exe.pie = false;
+    kernel_exe.force_pic = false;
+    kernel_exe.code_model = .medium;
+
+    b.installArtifact(kernel_exe);
+    
+    // const objcopy_step = kernel_exe.addObjCopy(.{
+    //     .format = .bin,
+    // });
+    // _ = objcopy_step;
+
+    // const install_bin_step = b.addInstallBinFile(objcopy_step.getOutputSource(), b.fmt("{s}.gba", .{"kernel"}));
+    // install_bin_step.step.dependOn(&objcopy_step.step);
+
+    // b.default_step.dependOn(&install_bin_step.step);
+
+    // std.debug.print("hello {s}\n", .{kernel_exe.getOutputSource().generated.path.?});
+
     const exe = b.addExecutable(.{
         .name = "bootx64",
         .root_source_file = .{ .path = "src/main.zig" },
@@ -16,10 +46,9 @@ pub fn build(b: *std.build.Builder) void {
         },
         .optimize = .Debug,
     });
-    // b.addObject(.{});
     b.verbose_llvm_ir = "out.ir";
     exe.dwarf_format = .@"64";
-    // exe.output_dirname_source = .{ .step = &exe.step, .path = "efi/boot" };
+    exe.defineCMacro("KERNEL_CODE_PATH", "zig-out/bin/kernel");
 
     const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
     run_step.addArgs(&.{ "uefi-run" });
@@ -41,9 +70,9 @@ pub fn build(b: *std.build.Builder) void {
         "--nographic",
     });
 
-    // exe.emit_analysis
     b.installArtifact(exe);
 
+    exe.step.dependOn(&kernel_exe.step);
     b.default_step.dependOn(&exe.step);
 
     const step = b.step("run", "Runs the executable");
