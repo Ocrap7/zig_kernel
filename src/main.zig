@@ -37,6 +37,7 @@ fn stringFromMemoryType(mem_type: uefi.tables.MemoryType) []const u8 {
 }
 
 extern fn EfiMain() void;
+// export fn EfiMain() void {}
 
 /// Return the index into `alloc.getMemoryMap()` that contains the descriptor that describes this loaded iamge.
 fn getLoaderMemoryIndex() ?usize {
@@ -58,6 +59,12 @@ const KernelParams = struct {
 };
 
 pub fn main() uefi.Status {
+
+    regs.cli();
+    regs.mask_legacy_pic();
+
+    // while (true) {}
+
     const con_out = uefi.system_table.con_out.?;
 
     log.setLogger(.{ .console = con_out });
@@ -83,7 +90,6 @@ pub fn main() uefi.Status {
 
     var rsdp : ?*align(1) Rsdp = null;
 
-    write.print("Hello\n\n", .{}) catch {};
     // Find RSDP
     for (0..uefi.system_table.number_of_table_entries) |i| {
         const table = &uefi.system_table.configuration_table[i];
@@ -97,7 +103,7 @@ pub fn main() uefi.Status {
 
     irq.init(rsdp.?.xsdt);
 
-    // const p = @as(?*anyopaque, EfiMain);
+    // asm volatile ("1: jmp 1b");
 
     // Let's us map page tables
     var cr0 = regs.CR0.get();
@@ -105,10 +111,6 @@ pub fn main() uefi.Status {
     regs.CR0.set(cr0);
 
     paging.PageTable.setRecursiveEntry();
-
-    // for (paging.getPageTable().entries[0].getPageTable().entries, 0..512) |entry, i| {
-    //     write.print("Entry {}: {} {X}\n", .{i, entry.flags.present, entry.getAddress()}) catch {};
-    // }
 
     switch (paging.mapPages(loader_code.physical_start, config.KERNEL_CODE_VIRTUAL_START, loader_code.number_of_pages, .{})) {
         .success => |_| {},
@@ -121,7 +123,6 @@ pub fn main() uefi.Status {
     const kernel_start_ptr: *const fn (*const KernelParams) callconv(.C) void = kernel_start;
     const kernel_start_address: usize = @intFromPtr(kernel_start_ptr);
     const kernel_start_offset = kernel_start_address - loader_code.physical_start;
-    write.print("Hello222 {X} {X}\n\n", .{rsdp.?.rsdt, @intFromPtr(rsdp.?.xsdt)}) catch {};
     const kernel_params = KernelParams{
         .rsdt_length = rsdp.?.length,
         .rsdt = @ptrFromInt(rsdp.?.rsdt),
@@ -130,16 +131,13 @@ pub fn main() uefi.Status {
 
     regs.jumpIP(config.KERNEL_CODE_VIRTUAL_START + kernel_start_offset, &kernel_params);
 
-    // Wait 5 seconds
-    // _ = boot_services.stall(5 * 1000 * 1000);
-
     return .Success;
 }
 
 fn kernel_start(params: *const KernelParams) callconv(.C) void {
     const write = log.getLogger().*.?.writer();
 
-    write.print("Hello Kernel {} {*}\n", .{ params.rsdt, params.xsdt }) catch {};
+    write.print("Hello Kernel {} {*} {X}\n", .{ params.rsdt, params.xsdt, regs.getIP() }) catch {};
     for (params.rsdt.entries()) |entry| {
         write.print("RSDT Entry: {X:0>8}\n", .{entry}) catch {};
     }
@@ -148,7 +146,8 @@ fn kernel_start(params: *const KernelParams) callconv(.C) void {
         write.print("XSDT Entry: {X} {s}\n", .{ entry.signature, entry.signatureStr() }) catch {};
     }
 
-    while (true) {
-        asm volatile ("nop");
-    }
+    // regs.sti();
+
+    while (true) { }
+    // }
 }

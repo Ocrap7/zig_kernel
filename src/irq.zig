@@ -27,7 +27,7 @@ const IDTEntry = packed struct {
 const IDT align(16) = struct {
     entries: [256]IDTEntry = .{.{ .offset_low = 0, .selector = 0, .offset_high = 0 }} ** 256,
 
-    pub fn kernelErrorISR(self: *IDT, index: u8, isr: *const fn (*const ISRFrame, u64) callconv(.Interrupt) void) void {
+    pub fn kernelErrorISR(self: *IDT, index: u8, isr: *const fn () callconv(.Naked) void) void {
         const isr_val = @intFromPtr(isr);
         self.entries[index] = .{
             .offset_low = @truncate(isr_val & 0xFFFF),
@@ -37,7 +37,7 @@ const IDT align(16) = struct {
         };
     }
 
-    pub fn kernelISR(self: *IDT, index: u8, isr: *const fn (*const ISRFrame) callconv(.Interrupt) void) void {
+    pub fn kernelISR(self: *IDT, index: u8, isr: *const fn () callconv(.Naked) void) void {
         const isr_val = @intFromPtr(isr);
         self.entries[index] = .{
             .offset_low = @truncate(isr_val & 0xFFFF),
@@ -52,11 +52,21 @@ var GLOBAL_IDT = IDT{};
 var IDT_DESCRIPTOR: packed struct { size: u16, base: u64 } = .{ .base = 0, .size = 0 };
 
 const ISRFrame = extern struct {
-    instruction_pointer: usize,
-    code_segment: u64,
-    cpu_flags: u64,
-    stack_pointer: usize,
-    stack_segment: u64,
+    rdi: u64,
+    rsi: u64,
+    rdx: u64,
+    rcx: u64,
+    rbx: u64,
+    rax: u64,
+
+    vector: u64,
+    error_code: u64,
+    
+    rip: usize,
+    cs: u64,
+    rflags: u64,
+    rsp: usize,
+    ss: u64,
 };
 
 const Apic = struct {
@@ -77,9 +87,11 @@ const Apic = struct {
         InterruptRequest = 0x200,
         ErrorStatus = 0x280,
         CMCI = 0x2F0,
-        InterruptCommand = 0x300,
+        IntCommandLow = 0x300,
+        IntCommandHigh = 0x310,
         LVTTimer = 0x320,
         LVTThermalSensor = 0x330,
+        LVTPCINT = 0x340,
         LVTLINT0 = 0x350,
         LVTLINT1 = 0x360,
         LVTError = 0x370,
@@ -96,6 +108,7 @@ const Apic = struct {
     pub fn write(register: Register, comptime value: anytype) void {
         const ptr: *@TypeOf(value) = @ptrFromInt(CONTROL_BASE + @as(usize, @intFromEnum(register)));
         ptr.* = value;
+        _ = ptr.*;
     }
 };
 
@@ -215,26 +228,87 @@ pub const IOApic = struct {
     }
 };
 
-fn isr_handler(vector: u8, frame: *const ISRFrame, error_code: ?u64) void {
-    _ = error_code;
-    regs.cli();
+export fn isr_handler(frame: *const ISRFrame) void {
+    // regs.cli();
 
-    log.*.?.writer().print("Interrupt {}: {X}\n", .{vector, @intFromPtr(&frame)}) catch {};
+    log.*.?.writer().print("Interrupt : {X}\n", .{frame.rip}) catch {};
+    // _ = frame;
 
     Apic.write(.EOI, @as(u32, 0));
-    regs.sti();
+    // regs.sti();
 }
 
+const PIC1: u16 = 0x20;
+const PIC2: u16	= 0xA0;
+const PIC1_COMMAND: u16	= PIC1;
+const PIC1_DATA: u16 = (PIC1+1);
+const PIC2_COMMAND: u16	= PIC2;
+const PIC2_DATA: u16 = (PIC2+1);
+
+const ICW1_ICW4: u8	= 0x01;	
+const ICW1_SINGLE: u8 = 0x02;	
+const ICW1_INTERVAL4: u8 = 0x04;
+const ICW1_LEVEL: u8 = 0x08;	
+const ICW1_INIT: u8	= 0x10;	
+ 
+const ICW4_8086: u8	= 0x01;	
+const ICW4_AUTO: u8	= 0x02;	
+const ICW4_BUF_SLAVE: u8 = 0x08;
+const ICW4_BUF_MASTER: u8 = 0x0C;
+const ICW4_SFNM: u8	= 0x10;	
+	
 pub fn init(xsdt: *const acpi.XSDT) void {
+    _ = xsdt;
+    // regs.out(23, @as(u8, 45));
+    // _ = regs.in(23, u8);
+    // const a1 = regs.in(PIC)
+    _ = asm ("in %[ret], %[reg]" : [ret] "=r" (-> u32) : [reg] "n" (4));
+    const a1: u32 = regs.in(4, u32);                        // save masks
+    _ = a1;
+	// const a2: u8 = regs.in(PIC2_DATA, u8);
+ 
+	regs.out(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4);  // starts the initialization sequence (in cascade mode)
+	regs.out(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
+	regs.out(PIC1_DATA, 0x20);                 // ICW2: Master PIC vector offset
+	regs.out(PIC2_DATA, 0x30);                 // ICW2: Slave PIC vector offset
+	regs.out(PIC1_DATA, 4);                       // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
+	regs.out(PIC2_DATA, 2);                       // ICW3: tell Slave PIC its cascade identity (0000 0010)
+ 
+	regs.out(PIC1_DATA, ICW4_8086);               // ICW4: have the PICs use 8086 mode (and not 8080 mode)
+	regs.out(PIC2_DATA, ICW4_8086);
+ 
+	// regs.out(PIC1_DATA, a1);   // restore saved masks.
+	// regs.out(PIC2_DATA, a2);
+}
+
+pub fn init2(xsdt: *const acpi.XSDT) void {
     if (regs.CpuFeatures.get().apic) @panic("CPU does not support APIC");
 
     regs.cli();
-
-    IDT_DESCRIPTOR.base = @intFromPtr(&GLOBAL_IDT);
-    IDT_DESCRIPTOR.size = 256 * @sizeOf(IDTEntry) - 1;
+    regs.mask_legacy_pic();
 
     Apic.write(.SpuriousVector, @as(packed struct { offset: u8, enable: bool }, .{ .offset = 0xFF, .enable = true }));
-    regs.mask_legacy_pic();
+    
+    Apic.write(.LVTTimer, @as(u32, 32 | 0x20000));
+    Apic.write(.DivideConfiguration, @as(u32, 0xB));
+    Apic.write(.InitialCount, @as(u32, 10000000));
+
+    Apic.write(.LVTPCINT, @as(u32, 0x10000));
+
+    Apic.write(.LVTLINT0, @as(u32, 0x10000));
+    Apic.write(.LVTLINT1, @as(u32, 0x10000));
+
+    Apic.write(.ErrorStatus, @as(u32, 0));
+    Apic.write(.ErrorStatus, @as(u32, 0));
+
+    Apic.write(.EOI, @as(u32, 0));
+
+    Apic.write(.IntCommandLow, @as(u32, 0x88500));
+    Apic.write(.IntCommandHigh, @as(u32, 0x0));
+
+    while (Apic.read(.IntCommandLow, u32) & 0x1000 != 0) {}
+
+    Apic.write(.TaskPriority, @as(u32, 0));
 
     const madt = xsdt.madt() orelse @panic("fskldf");
 
@@ -263,28 +337,26 @@ pub fn init(xsdt: *const acpi.XSDT) void {
     }
 
     var ioapic = IOApic{ .base = ioapic_address.? };
+    _ = ioapic;
 
-    ioapic.write(. { .Redirection = 0 }, IOApic.RedirectionEntry{
-        .vector = 0x20,
-        .destination = apic_id.?,
-        .masked = false,
-    });
+    // ioapic.write(. { .Redirection = 0 }, IOApic.RedirectionEntry{
+    //     .vector = 0x20,
+    //     .destination = apic_id.?,
+    //     .masked = true,
+    // });
 
-    ioapic.write(. { .Redirection = 7 }, IOApic.RedirectionEntry{
-        .vector = 0x27,
-        .destination = apic_id.?,
-        .masked = false,
-    });
+    // ioapic.write(. { .Redirection = 7 }, IOApic.RedirectionEntry{
+    //     .vector = 0x27,
+    //     .destination = apic_id.?,
+    //     .masked = false,
+    // });
 
+    IDT_DESCRIPTOR.base = @intFromPtr(&GLOBAL_IDT);
+    IDT_DESCRIPTOR.size = 256 * @sizeOf(IDTEntry) - 1;
     
     init_idt();
     asm volatile ("lidt (%[idtr])" :: [idtr] "r" (@intFromPtr(&IDT_DESCRIPTOR)));
 
-    Apic.write(.LVTTimer, @as(u32, 32 | 0x20000));
-    Apic.write(.DivideConfiguration, @as(u32, 0x3));
-    Apic.write(.InitialCount, @as(u32, 30000));
-
-    regs.sti();
 
     // asm volatile("int3");
 }
@@ -546,261 +618,340 @@ fn init_idt() void {
     GLOBAL_IDT.kernelISR(253, isr253);
     GLOBAL_IDT.kernelISR(254, isr254);
     GLOBAL_IDT.kernelISR(255, isr255);
+
 }
 
-fn isr0(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(0, frame, null); }
-fn isr1(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(1, frame, null); }
-fn isr2(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(2, frame, null); }
-fn isr3(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(3, frame, null); }
-fn isr4(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(4, frame, null); }
-fn isr5(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(5, frame, null); }
-fn isr6(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(6, frame, null); }
-fn isr7(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(7, frame, null); }
-fn isr8(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(8, frame, error_code); }
-fn isr9(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(9, frame, null); }
-fn isr10(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(10, frame, error_code); }
-fn isr11(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(11, frame, error_code); }
-fn isr12(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(12, frame, error_code); }
-fn isr13(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(13, frame, error_code); }
-fn isr14(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(14, frame, error_code); }
-fn isr15(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(15, frame, null); }
-fn isr16(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(16, frame, null); }
-fn isr17(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(17, frame, error_code); }
-fn isr18(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(18, frame, null); }
-fn isr19(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(19, frame, null); }
-fn isr20(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(20, frame, null); }
-fn isr21(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(21, frame, null); }
-fn isr22(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(22, frame, null); }
-fn isr23(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(23, frame, null); }
-fn isr24(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(24, frame, null); }
-fn isr25(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(25, frame, null); }
-fn isr26(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(26, frame, null); }
-fn isr27(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(27, frame, null); }
-fn isr28(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(28, frame, null); }
-fn isr29(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(29, frame, null); }
-fn isr30(frame: *const ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(30, frame, error_code); }
-fn isr31(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(31, frame, null); }
-fn isr32(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(32, frame, null); }
-fn isr33(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(33, frame, null); }
-fn isr34(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(34, frame, null); }
-fn isr35(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(35, frame, null); }
-fn isr36(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(36, frame, null); }
-fn isr37(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(37, frame, null); }
-fn isr38(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(38, frame, null); }
-fn isr39(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(39, frame, null); }
-fn isr40(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(40, frame, null); }
-fn isr41(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(41, frame, null); }
-fn isr42(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(42, frame, null); }
-fn isr43(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(43, frame, null); }
-fn isr44(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(44, frame, null); }
-fn isr45(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(45, frame, null); }
-fn isr46(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(46, frame, null); }
-fn isr47(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(47, frame, null); }
-fn isr48(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(48, frame, null); }
-fn isr49(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(49, frame, null); }
-fn isr50(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(50, frame, null); }
-fn isr51(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(51, frame, null); }
-fn isr52(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(52, frame, null); }
-fn isr53(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(53, frame, null); }
-fn isr54(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(54, frame, null); }
-fn isr55(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(55, frame, null); }
-fn isr56(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(56, frame, null); }
-fn isr57(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(57, frame, null); }
-fn isr58(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(58, frame, null); }
-fn isr59(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(59, frame, null); }
-fn isr60(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(60, frame, null); }
-fn isr61(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(61, frame, null); }
-fn isr62(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(62, frame, null); }
-fn isr63(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(63, frame, null); }
-fn isr64(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(64, frame, null); }
-fn isr65(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(65, frame, null); }
-fn isr66(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(66, frame, null); }
-fn isr67(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(67, frame, null); }
-fn isr68(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(68, frame, null); }
-fn isr69(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(69, frame, null); }
-fn isr70(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(70, frame, null); }
-fn isr71(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(71, frame, null); }
-fn isr72(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(72, frame, null); }
-fn isr73(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(73, frame, null); }
-fn isr74(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(74, frame, null); }
-fn isr75(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(75, frame, null); }
-fn isr76(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(76, frame, null); }
-fn isr77(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(77, frame, null); }
-fn isr78(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(78, frame, null); }
-fn isr79(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(79, frame, null); }
-fn isr80(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(80, frame, null); }
-fn isr81(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(81, frame, null); }
-fn isr82(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(82, frame, null); }
-fn isr83(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(83, frame, null); }
-fn isr84(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(84, frame, null); }
-fn isr85(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(85, frame, null); }
-fn isr86(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(86, frame, null); }
-fn isr87(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(87, frame, null); }
-fn isr88(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(88, frame, null); }
-fn isr89(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(89, frame, null); }
-fn isr90(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(90, frame, null); }
-fn isr91(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(91, frame, null); }
-fn isr92(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(92, frame, null); }
-fn isr93(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(93, frame, null); }
-fn isr94(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(94, frame, null); }
-fn isr95(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(95, frame, null); }
-fn isr96(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(96, frame, null); }
-fn isr97(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(97, frame, null); }
-fn isr98(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(98, frame, null); }
-fn isr99(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(99, frame, null); }
-fn isr100(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(100, frame, null); }
-fn isr101(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(101, frame, null); }
-fn isr102(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(102, frame, null); }
-fn isr103(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(103, frame, null); }
-fn isr104(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(104, frame, null); }
-fn isr105(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(105, frame, null); }
-fn isr106(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(106, frame, null); }
-fn isr107(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(107, frame, null); }
-fn isr108(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(108, frame, null); }
-fn isr109(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(109, frame, null); }
-fn isr110(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(110, frame, null); }
-fn isr111(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(111, frame, null); }
-fn isr112(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(112, frame, null); }
-fn isr113(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(113, frame, null); }
-fn isr114(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(114, frame, null); }
-fn isr115(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(115, frame, null); }
-fn isr116(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(116, frame, null); }
-fn isr117(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(117, frame, null); }
-fn isr118(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(118, frame, null); }
-fn isr119(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(119, frame, null); }
-fn isr120(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(120, frame, null); }
-fn isr121(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(121, frame, null); }
-fn isr122(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(122, frame, null); }
-fn isr123(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(123, frame, null); }
-fn isr124(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(124, frame, null); }
-fn isr125(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(125, frame, null); }
-fn isr126(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(126, frame, null); }
-fn isr127(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(127, frame, null); }
-fn isr128(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(128, frame, null); }
-fn isr129(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(129, frame, null); }
-fn isr130(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(130, frame, null); }
-fn isr131(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(131, frame, null); }
-fn isr132(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(132, frame, null); }
-fn isr133(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(133, frame, null); }
-fn isr134(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(134, frame, null); }
-fn isr135(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(135, frame, null); }
-fn isr136(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(136, frame, null); }
-fn isr137(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(137, frame, null); }
-fn isr138(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(138, frame, null); }
-fn isr139(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(139, frame, null); }
-fn isr140(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(140, frame, null); }
-fn isr141(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(141, frame, null); }
-fn isr142(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(142, frame, null); }
-fn isr143(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(143, frame, null); }
-fn isr144(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(144, frame, null); }
-fn isr145(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(145, frame, null); }
-fn isr146(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(146, frame, null); }
-fn isr147(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(147, frame, null); }
-fn isr148(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(148, frame, null); }
-fn isr149(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(149, frame, null); }
-fn isr150(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(150, frame, null); }
-fn isr151(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(151, frame, null); }
-fn isr152(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(152, frame, null); }
-fn isr153(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(153, frame, null); }
-fn isr154(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(154, frame, null); }
-fn isr155(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(155, frame, null); }
-fn isr156(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(156, frame, null); }
-fn isr157(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(157, frame, null); }
-fn isr158(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(158, frame, null); }
-fn isr159(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(159, frame, null); }
-fn isr160(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(160, frame, null); }
-fn isr161(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(161, frame, null); }
-fn isr162(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(162, frame, null); }
-fn isr163(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(163, frame, null); }
-fn isr164(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(164, frame, null); }
-fn isr165(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(165, frame, null); }
-fn isr166(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(166, frame, null); }
-fn isr167(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(167, frame, null); }
-fn isr168(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(168, frame, null); }
-fn isr169(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(169, frame, null); }
-fn isr170(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(170, frame, null); }
-fn isr171(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(171, frame, null); }
-fn isr172(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(172, frame, null); }
-fn isr173(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(173, frame, null); }
-fn isr174(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(174, frame, null); }
-fn isr175(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(175, frame, null); }
-fn isr176(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(176, frame, null); }
-fn isr177(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(177, frame, null); }
-fn isr178(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(178, frame, null); }
-fn isr179(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(179, frame, null); }
-fn isr180(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(180, frame, null); }
-fn isr181(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(181, frame, null); }
-fn isr182(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(182, frame, null); }
-fn isr183(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(183, frame, null); }
-fn isr184(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(184, frame, null); }
-fn isr185(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(185, frame, null); }
-fn isr186(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(186, frame, null); }
-fn isr187(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(187, frame, null); }
-fn isr188(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(188, frame, null); }
-fn isr189(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(189, frame, null); }
-fn isr190(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(190, frame, null); }
-fn isr191(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(191, frame, null); }
-fn isr192(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(192, frame, null); }
-fn isr193(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(193, frame, null); }
-fn isr194(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(194, frame, null); }
-fn isr195(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(195, frame, null); }
-fn isr196(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(196, frame, null); }
-fn isr197(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(197, frame, null); }
-fn isr198(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(198, frame, null); }
-fn isr199(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(199, frame, null); }
-fn isr200(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(200, frame, null); }
-fn isr201(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(201, frame, null); }
-fn isr202(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(202, frame, null); }
-fn isr203(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(203, frame, null); }
-fn isr204(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(204, frame, null); }
-fn isr205(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(205, frame, null); }
-fn isr206(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(206, frame, null); }
-fn isr207(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(207, frame, null); }
-fn isr208(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(208, frame, null); }
-fn isr209(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(209, frame, null); }
-fn isr210(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(210, frame, null); }
-fn isr211(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(211, frame, null); }
-fn isr212(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(212, frame, null); }
-fn isr213(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(213, frame, null); }
-fn isr214(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(214, frame, null); }
-fn isr215(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(215, frame, null); }
-fn isr216(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(216, frame, null); }
-fn isr217(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(217, frame, null); }
-fn isr218(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(218, frame, null); }
-fn isr219(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(219, frame, null); }
-fn isr220(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(220, frame, null); }
-fn isr221(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(221, frame, null); }
-fn isr222(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(222, frame, null); }
-fn isr223(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(223, frame, null); }
-fn isr224(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(224, frame, null); }
-fn isr225(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(225, frame, null); }
-fn isr226(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(226, frame, null); }
-fn isr227(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(227, frame, null); }
-fn isr228(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(228, frame, null); }
-fn isr229(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(229, frame, null); }
-fn isr230(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(230, frame, null); }
-fn isr231(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(231, frame, null); }
-fn isr232(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(232, frame, null); }
-fn isr233(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(233, frame, null); }
-fn isr234(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(234, frame, null); }
-fn isr235(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(235, frame, null); }
-fn isr236(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(236, frame, null); }
-fn isr237(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(237, frame, null); }
-fn isr238(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(238, frame, null); }
-fn isr239(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(239, frame, null); }
-fn isr240(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(240, frame, null); }
-fn isr241(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(241, frame, null); }
-fn isr242(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(242, frame, null); }
-fn isr243(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(243, frame, null); }
-fn isr244(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(244, frame, null); }
-fn isr245(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(245, frame, null); }
-fn isr246(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(246, frame, null); }
-fn isr247(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(247, frame, null); }
-fn isr248(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(248, frame, null); }
-fn isr249(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(249, frame, null); }
-fn isr250(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(250, frame, null); }
-fn isr251(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(251, frame, null); }
-fn isr252(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(252, frame, null); }
-fn isr253(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(253, frame, null); }
-fn isr254(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(254, frame, null); }
-fn isr255(frame: *const ISRFrame) callconv(.Interrupt) void { isr_handler(255, frame, null); }
+// TODO: Use callconv(.Interrupt) functions when they work
+
+comptime {
+    asm (
+        \\.global isr_stub_next
+        \\isr_stub_next:
+    
+        \\    push %rax   
+        \\    push %rbx   
+        \\    push %rcx   
+        \\    push %rdx   
+        \\    push %rsi   
+        \\    push %rdi   
+
+        \\    mov %rsp, %rcx
+
+        \\    call isr_handler
+
+        \\    pop %rdi
+        \\    pop %rsi
+        \\    pop %rdx
+        \\    pop %rcx
+        \\    pop %rbx
+        \\    pop %rax  
+
+        \\    add $16, %rsp
+        \\    iret
+    );
+
+    
+    asm (
+        \\.global isr_stub_next
+        \\isr_stub_next_err:
+    
+        \\    push %rax   
+        \\    push %rbx   
+        \\    push %rcx   
+        \\    push %rdx   
+        \\    push %rsi   
+        \\    push %rdi   
+
+        \\    mov %rsp, %rcx
+
+        \\    call isr_handler
+
+        \\    pop %rdi
+        \\    pop %rsi
+        \\    pop %rdx
+        \\    pop %rcx
+        \\    pop %rbx
+        \\    pop %rax  
+
+        \\    add $8, %rsp
+        \\    iret
+    );
+}
+
+fn isr_stub(comptime vector: u64) callconv(.Inline) void {
+    // asm volatile ("1: jmp 1b");
+    asm volatile (
+        // \\cli
+        \\pushq $0   
+        \\pushq %[vector]
+        \\jmp isr_stub_next
+        :: [vector] "n" (vector)
+    );
+}
+
+fn isr_stub_err(comptime vector: u64) callconv(.Inline) void {
+    asm volatile (
+        // \\cli
+        \\pushq %[vector]
+        \\jmp isr_stub_next
+        :: [vector] "n" (vector)
+    );
+}
+
+// Functions generated by virt.js
+fn isr0() callconv(.Naked) void { isr_stub(0); }
+fn isr1() callconv(.Naked) void { isr_stub(1); }
+fn isr2() callconv(.Naked) void { isr_stub(2); }
+fn isr3() callconv(.Naked) void { isr_stub(3); }
+fn isr4() callconv(.Naked) void { isr_stub(4); }
+fn isr5() callconv(.Naked) void { isr_stub(5); }
+fn isr6() callconv(.Naked) void { isr_stub(6); }
+fn isr7() callconv(.Naked) void { isr_stub(7); }
+fn isr8() callconv(.Naked) void { isr_stub_err(8); }
+fn isr9() callconv(.Naked) void { isr_stub(9); }
+fn isr10() callconv(.Naked) void { isr_stub_err(10); }
+fn isr11() callconv(.Naked) void { isr_stub_err(11); }
+fn isr12() callconv(.Naked) void { isr_stub_err(12); }
+fn isr13() callconv(.Naked) void { isr_stub_err(13); }
+fn isr14() callconv(.Naked) void { isr_stub_err(14); }
+fn isr15() callconv(.Naked) void { isr_stub(15); }
+fn isr16() callconv(.Naked) void { isr_stub(16); }
+fn isr17() callconv(.Naked) void { isr_stub_err(17); }
+fn isr18() callconv(.Naked) void { isr_stub(18); }
+fn isr19() callconv(.Naked) void { isr_stub(19); }
+fn isr20() callconv(.Naked) void { isr_stub(20); }
+fn isr21() callconv(.Naked) void { isr_stub(21); }
+fn isr22() callconv(.Naked) void { isr_stub(22); }
+fn isr23() callconv(.Naked) void { isr_stub(23); }
+fn isr24() callconv(.Naked) void { isr_stub(24); }
+fn isr25() callconv(.Naked) void { isr_stub(25); }
+fn isr26() callconv(.Naked) void { isr_stub(26); }
+fn isr27() callconv(.Naked) void { isr_stub(27); }
+fn isr28() callconv(.Naked) void { isr_stub(28); }
+fn isr29() callconv(.Naked) void { isr_stub(29); }
+fn isr30() callconv(.Naked) void { isr_stub_err(30); }
+fn isr31() callconv(.Naked) void { isr_stub(31); }
+fn isr32() callconv(.Naked) void { isr_stub(32); }
+fn isr33() callconv(.Naked) void { isr_stub(33); }
+fn isr34() callconv(.Naked) void { isr_stub(34); }
+fn isr35() callconv(.Naked) void { isr_stub(35); }
+fn isr36() callconv(.Naked) void { isr_stub(36); }
+fn isr37() callconv(.Naked) void { isr_stub(37); }
+fn isr38() callconv(.Naked) void { isr_stub(38); }
+fn isr39() callconv(.Naked) void { isr_stub(39); }
+fn isr40() callconv(.Naked) void { isr_stub(40); }
+fn isr41() callconv(.Naked) void { isr_stub(41); }
+fn isr42() callconv(.Naked) void { isr_stub(42); }
+fn isr43() callconv(.Naked) void { isr_stub(43); }
+fn isr44() callconv(.Naked) void { isr_stub(44); }
+fn isr45() callconv(.Naked) void { isr_stub(45); }
+fn isr46() callconv(.Naked) void { isr_stub(46); }
+fn isr47() callconv(.Naked) void { isr_stub(47); }
+fn isr48() callconv(.Naked) void { isr_stub(48); }
+fn isr49() callconv(.Naked) void { isr_stub(49); }
+fn isr50() callconv(.Naked) void { isr_stub(50); }
+fn isr51() callconv(.Naked) void { isr_stub(51); }
+fn isr52() callconv(.Naked) void { isr_stub(52); }
+fn isr53() callconv(.Naked) void { isr_stub(53); }
+fn isr54() callconv(.Naked) void { isr_stub(54); }
+fn isr55() callconv(.Naked) void { isr_stub(55); }
+fn isr56() callconv(.Naked) void { isr_stub(56); }
+fn isr57() callconv(.Naked) void { isr_stub(57); }
+fn isr58() callconv(.Naked) void { isr_stub(58); }
+fn isr59() callconv(.Naked) void { isr_stub(59); }
+fn isr60() callconv(.Naked) void { isr_stub(60); }
+fn isr61() callconv(.Naked) void { isr_stub(61); }
+fn isr62() callconv(.Naked) void { isr_stub(62); }
+fn isr63() callconv(.Naked) void { isr_stub(63); }
+fn isr64() callconv(.Naked) void { isr_stub(64); }
+fn isr65() callconv(.Naked) void { isr_stub(65); }
+fn isr66() callconv(.Naked) void { isr_stub(66); }
+fn isr67() callconv(.Naked) void { isr_stub(67); }
+fn isr68() callconv(.Naked) void { isr_stub(68); }
+fn isr69() callconv(.Naked) void { isr_stub(69); }
+fn isr70() callconv(.Naked) void { isr_stub(70); }
+fn isr71() callconv(.Naked) void { isr_stub(71); }
+fn isr72() callconv(.Naked) void { isr_stub(72); }
+fn isr73() callconv(.Naked) void { isr_stub(73); }
+fn isr74() callconv(.Naked) void { isr_stub(74); }
+fn isr75() callconv(.Naked) void { isr_stub(75); }
+fn isr76() callconv(.Naked) void { isr_stub(76); }
+fn isr77() callconv(.Naked) void { isr_stub(77); }
+fn isr78() callconv(.Naked) void { isr_stub(78); }
+fn isr79() callconv(.Naked) void { isr_stub(79); }
+fn isr80() callconv(.Naked) void { isr_stub(80); }
+fn isr81() callconv(.Naked) void { isr_stub(81); }
+fn isr82() callconv(.Naked) void { isr_stub(82); }
+fn isr83() callconv(.Naked) void { isr_stub(83); }
+fn isr84() callconv(.Naked) void { isr_stub(84); }
+fn isr85() callconv(.Naked) void { isr_stub(85); }
+fn isr86() callconv(.Naked) void { isr_stub(86); }
+fn isr87() callconv(.Naked) void { isr_stub(87); }
+fn isr88() callconv(.Naked) void { isr_stub(88); }
+fn isr89() callconv(.Naked) void { isr_stub(89); }
+fn isr90() callconv(.Naked) void { isr_stub(90); }
+fn isr91() callconv(.Naked) void { isr_stub(91); }
+fn isr92() callconv(.Naked) void { isr_stub(92); }
+fn isr93() callconv(.Naked) void { isr_stub(93); }
+fn isr94() callconv(.Naked) void { isr_stub(94); }
+fn isr95() callconv(.Naked) void { isr_stub(95); }
+fn isr96() callconv(.Naked) void { isr_stub(96); }
+fn isr97() callconv(.Naked) void { isr_stub(97); }
+fn isr98() callconv(.Naked) void { isr_stub(98); }
+fn isr99() callconv(.Naked) void { isr_stub(99); }
+fn isr100() callconv(.Naked) void { isr_stub(100); }
+fn isr101() callconv(.Naked) void { isr_stub(101); }
+fn isr102() callconv(.Naked) void { isr_stub(102); }
+fn isr103() callconv(.Naked) void { isr_stub(103); }
+fn isr104() callconv(.Naked) void { isr_stub(104); }
+fn isr105() callconv(.Naked) void { isr_stub(105); }
+fn isr106() callconv(.Naked) void { isr_stub(106); }
+fn isr107() callconv(.Naked) void { isr_stub(107); }
+fn isr108() callconv(.Naked) void { isr_stub(108); }
+fn isr109() callconv(.Naked) void { isr_stub(109); }
+fn isr110() callconv(.Naked) void { isr_stub(110); }
+fn isr111() callconv(.Naked) void { isr_stub(111); }
+fn isr112() callconv(.Naked) void { isr_stub(112); }
+fn isr113() callconv(.Naked) void { isr_stub(113); }
+fn isr114() callconv(.Naked) void { isr_stub(114); }
+fn isr115() callconv(.Naked) void { isr_stub(115); }
+fn isr116() callconv(.Naked) void { isr_stub(116); }
+fn isr117() callconv(.Naked) void { isr_stub(117); }
+fn isr118() callconv(.Naked) void { isr_stub(118); }
+fn isr119() callconv(.Naked) void { isr_stub(119); }
+fn isr120() callconv(.Naked) void { isr_stub(120); }
+fn isr121() callconv(.Naked) void { isr_stub(121); }
+fn isr122() callconv(.Naked) void { isr_stub(122); }
+fn isr123() callconv(.Naked) void { isr_stub(123); }
+fn isr124() callconv(.Naked) void { isr_stub(124); }
+fn isr125() callconv(.Naked) void { isr_stub(125); }
+fn isr126() callconv(.Naked) void { isr_stub(126); }
+fn isr127() callconv(.Naked) void { isr_stub(127); }
+fn isr128() callconv(.Naked) void { isr_stub(128); }
+fn isr129() callconv(.Naked) void { isr_stub(129); }
+fn isr130() callconv(.Naked) void { isr_stub(130); }
+fn isr131() callconv(.Naked) void { isr_stub(131); }
+fn isr132() callconv(.Naked) void { isr_stub(132); }
+fn isr133() callconv(.Naked) void { isr_stub(133); }
+fn isr134() callconv(.Naked) void { isr_stub(134); }
+fn isr135() callconv(.Naked) void { isr_stub(135); }
+fn isr136() callconv(.Naked) void { isr_stub(136); }
+fn isr137() callconv(.Naked) void { isr_stub(137); }
+fn isr138() callconv(.Naked) void { isr_stub(138); }
+fn isr139() callconv(.Naked) void { isr_stub(139); }
+fn isr140() callconv(.Naked) void { isr_stub(140); }
+fn isr141() callconv(.Naked) void { isr_stub(141); }
+fn isr142() callconv(.Naked) void { isr_stub(142); }
+fn isr143() callconv(.Naked) void { isr_stub(143); }
+fn isr144() callconv(.Naked) void { isr_stub(144); }
+fn isr145() callconv(.Naked) void { isr_stub(145); }
+fn isr146() callconv(.Naked) void { isr_stub(146); }
+fn isr147() callconv(.Naked) void { isr_stub(147); }
+fn isr148() callconv(.Naked) void { isr_stub(148); }
+fn isr149() callconv(.Naked) void { isr_stub(149); }
+fn isr150() callconv(.Naked) void { isr_stub(150); }
+fn isr151() callconv(.Naked) void { isr_stub(151); }
+fn isr152() callconv(.Naked) void { isr_stub(152); }
+fn isr153() callconv(.Naked) void { isr_stub(153); }
+fn isr154() callconv(.Naked) void { isr_stub(154); }
+fn isr155() callconv(.Naked) void { isr_stub(155); }
+fn isr156() callconv(.Naked) void { isr_stub(156); }
+fn isr157() callconv(.Naked) void { isr_stub(157); }
+fn isr158() callconv(.Naked) void { isr_stub(158); }
+fn isr159() callconv(.Naked) void { isr_stub(159); }
+fn isr160() callconv(.Naked) void { isr_stub(160); }
+fn isr161() callconv(.Naked) void { isr_stub(161); }
+fn isr162() callconv(.Naked) void { isr_stub(162); }
+fn isr163() callconv(.Naked) void { isr_stub(163); }
+fn isr164() callconv(.Naked) void { isr_stub(164); }
+fn isr165() callconv(.Naked) void { isr_stub(165); }
+fn isr166() callconv(.Naked) void { isr_stub(166); }
+fn isr167() callconv(.Naked) void { isr_stub(167); }
+fn isr168() callconv(.Naked) void { isr_stub(168); }
+fn isr169() callconv(.Naked) void { isr_stub(169); }
+fn isr170() callconv(.Naked) void { isr_stub(170); }
+fn isr171() callconv(.Naked) void { isr_stub(171); }
+fn isr172() callconv(.Naked) void { isr_stub(172); }
+fn isr173() callconv(.Naked) void { isr_stub(173); }
+fn isr174() callconv(.Naked) void { isr_stub(174); }
+fn isr175() callconv(.Naked) void { isr_stub(175); }
+fn isr176() callconv(.Naked) void { isr_stub(176); }
+fn isr177() callconv(.Naked) void { isr_stub(177); }
+fn isr178() callconv(.Naked) void { isr_stub(178); }
+fn isr179() callconv(.Naked) void { isr_stub(179); }
+fn isr180() callconv(.Naked) void { isr_stub(180); }
+fn isr181() callconv(.Naked) void { isr_stub(181); }
+fn isr182() callconv(.Naked) void { isr_stub(182); }
+fn isr183() callconv(.Naked) void { isr_stub(183); }
+fn isr184() callconv(.Naked) void { isr_stub(184); }
+fn isr185() callconv(.Naked) void { isr_stub(185); }
+fn isr186() callconv(.Naked) void { isr_stub(186); }
+fn isr187() callconv(.Naked) void { isr_stub(187); }
+fn isr188() callconv(.Naked) void { isr_stub(188); }
+fn isr189() callconv(.Naked) void { isr_stub(189); }
+fn isr190() callconv(.Naked) void { isr_stub(190); }
+fn isr191() callconv(.Naked) void { isr_stub(191); }
+fn isr192() callconv(.Naked) void { isr_stub(192); }
+fn isr193() callconv(.Naked) void { isr_stub(193); }
+fn isr194() callconv(.Naked) void { isr_stub(194); }
+fn isr195() callconv(.Naked) void { isr_stub(195); }
+fn isr196() callconv(.Naked) void { isr_stub(196); }
+fn isr197() callconv(.Naked) void { isr_stub(197); }
+fn isr198() callconv(.Naked) void { isr_stub(198); }
+fn isr199() callconv(.Naked) void { isr_stub(199); }
+fn isr200() callconv(.Naked) void { isr_stub(200); }
+fn isr201() callconv(.Naked) void { isr_stub(201); }
+fn isr202() callconv(.Naked) void { isr_stub(202); }
+fn isr203() callconv(.Naked) void { isr_stub(203); }
+fn isr204() callconv(.Naked) void { isr_stub(204); }
+fn isr205() callconv(.Naked) void { isr_stub(205); }
+fn isr206() callconv(.Naked) void { isr_stub(206); }
+fn isr207() callconv(.Naked) void { isr_stub(207); }
+fn isr208() callconv(.Naked) void { isr_stub(208); }
+fn isr209() callconv(.Naked) void { isr_stub(209); }
+fn isr210() callconv(.Naked) void { isr_stub(210); }
+fn isr211() callconv(.Naked) void { isr_stub(211); }
+fn isr212() callconv(.Naked) void { isr_stub(212); }
+fn isr213() callconv(.Naked) void { isr_stub(213); }
+fn isr214() callconv(.Naked) void { isr_stub(214); }
+fn isr215() callconv(.Naked) void { isr_stub(215); }
+fn isr216() callconv(.Naked) void { isr_stub(216); }
+fn isr217() callconv(.Naked) void { isr_stub(217); }
+fn isr218() callconv(.Naked) void { isr_stub(218); }
+fn isr219() callconv(.Naked) void { isr_stub(219); }
+fn isr220() callconv(.Naked) void { isr_stub(220); }
+fn isr221() callconv(.Naked) void { isr_stub(221); }
+fn isr222() callconv(.Naked) void { isr_stub(222); }
+fn isr223() callconv(.Naked) void { isr_stub(223); }
+fn isr224() callconv(.Naked) void { isr_stub(224); }
+fn isr225() callconv(.Naked) void { isr_stub(225); }
+fn isr226() callconv(.Naked) void { isr_stub(226); }
+fn isr227() callconv(.Naked) void { isr_stub(227); }
+fn isr228() callconv(.Naked) void { isr_stub(228); }
+fn isr229() callconv(.Naked) void { isr_stub(229); }
+fn isr230() callconv(.Naked) void { isr_stub(230); }
+fn isr231() callconv(.Naked) void { isr_stub(231); }
+fn isr232() callconv(.Naked) void { isr_stub(232); }
+fn isr233() callconv(.Naked) void { isr_stub(233); }
+fn isr234() callconv(.Naked) void { isr_stub(234); }
+fn isr235() callconv(.Naked) void { isr_stub(235); }
+fn isr236() callconv(.Naked) void { isr_stub(236); }
+fn isr237() callconv(.Naked) void { isr_stub(237); }
+fn isr238() callconv(.Naked) void { isr_stub(238); }
+fn isr239() callconv(.Naked) void { isr_stub(239); }
+fn isr240() callconv(.Naked) void { isr_stub(240); }
+fn isr241() callconv(.Naked) void { isr_stub(241); }
+fn isr242() callconv(.Naked) void { isr_stub(242); }
+fn isr243() callconv(.Naked) void { isr_stub(243); }
+fn isr244() callconv(.Naked) void { isr_stub(244); }
+fn isr245() callconv(.Naked) void { isr_stub(245); }
+fn isr246() callconv(.Naked) void { isr_stub(246); }
+fn isr247() callconv(.Naked) void { isr_stub(247); }
+fn isr248() callconv(.Naked) void { isr_stub(248); }
+fn isr249() callconv(.Naked) void { isr_stub(249); }
+fn isr250() callconv(.Naked) void { isr_stub(250); }
+fn isr251() callconv(.Naked) void { isr_stub(251); }
+fn isr252() callconv(.Naked) void { isr_stub(252); }
+fn isr253() callconv(.Naked) void { isr_stub(253); }
+fn isr254() callconv(.Naked) void { isr_stub(254); }
+fn isr255() callconv(.Naked) void { isr_stub(255); }

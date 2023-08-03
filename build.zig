@@ -17,7 +17,8 @@ pub fn build(b: *std.build.Builder) void {
         .optimize = .Debug,
     });
     // b.addObject(.{});
-    // b.verbose_llvm_ir = "out.ir";
+    b.verbose_llvm_ir = "out.ir";
+    exe.dwarf_format = .@"64";
     // exe.output_dirname_source = .{ .step = &exe.step, .path = "efi/boot" };
 
     const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
@@ -28,8 +29,9 @@ pub fn build(b: *std.build.Builder) void {
         "-D", "qemu.log",
         "-d", "int",
         "-s",
-        "-debugcon", "file:uefi_debug.log", "-global", "isa-debugcon.iobase=0x402",
-        "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+        // "-debugcon", "file:uefi_debug.log", "-global", "isa-debugcon.iobase=0x402",
+        // "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/edk2-ovmf/x64/OVMF_CODE.fd",
+        "-drive", "if=pflash,format=raw,readonly=on,file=ovmf-x64/OVMF_CODE-pure-efi.fd",
         // "-drive if=pflash,format=raw,file=/usr/share/edk2-ovmf/x64/OVMF_VARS.fd",
         "-machine", "q35",
         "-no-reboot",

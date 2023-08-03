@@ -190,5 +190,19 @@ pub fn cli() callconv(.Inline) void {
 }
 
 pub fn mask_legacy_pic() callconv(.Inline) void {
-    asm volatile("out %al, $0xA1; out %al, $0x21" :: [mask] "{al}" (0xFF));
+    asm volatile("outb %[mask], $0xA1; outb %[mask], $0x21" :: [mask] "{al}" (@as(u8, 0xFF)));
+}
+
+pub fn out(comptime port: u16, value: anytype) callconv(.Inline) void {
+    switch (@sizeOf(@TypeOf(value))) {
+        1 => asm volatile("outb %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
+        2 => asm volatile("outw %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
+        4 => asm volatile("outd %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
+        8 => asm volatile("outq %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
+        else => @panic("Unexpected type size")
+    }
+}
+
+pub fn in(comptime port: u16, comptime ty: type) ty {
+    return asm("in %[ret], %[reg]" : [ret] "=r" (-> ty) : [reg] "n" (port));
 }

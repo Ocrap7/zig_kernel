@@ -21,8 +21,8 @@ for (let i = 0; i < 256; i+= 1) {
 
 for (let i = 0; i < 256; i+= 1) {
   if (errorCodes.includes(i)) {
-    console.log(`fn isr${i}(frame: ISRFrame, error_code: u64) callconv(.Interrupt) void { isr_handler(${i}, frame, error_code); }`)
+    console.log(`fn isr${i}() callconv(.Naked) void { isr_stub_err(${i}); }`)
   } else {
-    console.log(`fn isr${i}(frame: ISRFrame) callconv(.Interrupt) void { isr_handler(${i}, frame, null); }`)
+    console.log(`fn isr${i}() callconv(.Naked) void { isr_stub(${i}); }`)
   }
 }
