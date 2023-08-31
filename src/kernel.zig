@@ -2,36 +2,37 @@ const std = @import("std");
 const uefi = @import("std").os.uefi;
 
 const log = @import("./logger.zig");
-const paging = @import("./paging.zig");
 const regs = @import("./registers.zig");
 const alloc = @import("./allocator.zig");
 const acpi = @import("./acpi/acpi.zig");
+const gdt = @import("./gdt.zig");
 const irq = @import("./irq.zig");
-const config = @import("./config.zig");
+const devices = @import("./devices/devices.zig");
 
 pub const KernelParams = struct {
-    rsdt_length: usize,
-    rsdt: *align(1) const acpi.RSDP,
+    rsdt: *align(1) const acpi.RSDT,
     xsdt: *align(1) const acpi.XSDT,
+
+    memory_map: []alloc.MemoryDescriptor,
+    allocated: alloc.MappedPages,
 };
 
 export fn kernel_start(params: *const KernelParams) callconv(.C) void {
-    const write = log.getLogger().*.?.writer();
+    gdt.init_gdt();
+    irq.init_idt();
 
-    write.print("Hello Kernel {} {*} {X}\n", .{ params.rsdt, params.xsdt, regs.getIP() }) catch {};
-    for (params.rsdt.entries()) |entry| {
-        write.print("RSDT Entry: {X:0>8}\n", .{entry}) catch {};
-    }
+    log.set_kernel();
+    devices.init_default();
 
-    for (params.xsdt.entries()) |entry| {
-        write.print("XSDT Entry: {X} {s}\n", .{ entry.signature, entry.signatureStr() }) catch {};
-    }
+    alloc.copyMemoryMap(params.memory_map, params.allocated); // We copy the memory map so that we can eventually (safely) unmap the bootloader pages
+    alloc.printMemoryMap();
 
-    irq.init(params.xsdt);
+    const stats = alloc.MemoryStats.collect();
+    stats.print();
+
+    log.info("kernel", .{}, @src());
 
     regs.sti();
-    asm volatile ("int3");
 
     while (true) {}
-    // }
 }

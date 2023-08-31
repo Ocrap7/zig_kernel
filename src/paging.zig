@@ -1,18 +1,23 @@
-const logger = @import("./logger.zig").getLogger();
+const log = @import("./logger.zig");
 const regs = @import("./registers.zig");
 const alloc = @import("./allocator.zig");
 const assert = @import("std").debug.assert;
 
+/// Determines the accesibility of the page
 pub const PageTableMode = enum(u1) {
     user,
     kernel,
 };
 
+/// Determines the size of the page
 pub const PageSize = enum(u1) {
+    /// 4KiB page size
     small,
+    /// 2MiB or 1GiB page size
     large,
 };
 
+/// Page table entry flags
 pub const MappingFlags = packed struct {
     present: bool = false,
     writable: bool = false,
@@ -70,11 +75,13 @@ pub const PageTableEntry = packed struct {
     }
 };
 
+/// The max number of page table entries.
 pub const PAGE_TABLE_ENTRIES = 512;
+/// The index of the page table entry used for recursive mapping
 var RECURSIVE_INDEX: usize = 255;
 
 pub const PageTable align(4096) = struct {
-    entries: [PAGE_TABLE_ENTRIES]PageTableEntry = [_]PageTableEntry{ .{} } ** PAGE_TABLE_ENTRIES,
+    entries: [PAGE_TABLE_ENTRIES]PageTableEntry = [_]PageTableEntry{.{}} ** PAGE_TABLE_ENTRIES,
 
     /// Inserts the recusrive page entry at `RECUSRIVE_INDEX`. This should only be allowed for the top level page table.
     pub fn setRecursiveEntry() void {
@@ -88,7 +95,7 @@ pub const PageTable align(4096) = struct {
                 .writable = true,
             };
         } else {
-            @panic("Unable to set entry 511");
+            log.panic("Unable to set entry 511", .{}, @src());
         }
     }
 
@@ -123,7 +130,9 @@ comptime {
 
 /// Returns the top level page table (reads cr3 register).
 pub fn getPageTable() *PageTable {
-    var address = asm volatile ("mov %cr3, %rax" : [ret] "={rax}" (-> u64));
+    var address = asm volatile ("mov %cr3, %rax"
+        : [ret] "={rax}" (-> u64),
+    );
 
     return @ptrFromInt(address);
 }
@@ -133,7 +142,7 @@ const PagingLevel = enum(u8) {
     L2,
     L3,
     L4,
-    L5,  
+    L5,
 };
 
 const PagingError = union(enum) {
@@ -179,7 +188,7 @@ pub fn translateToPhysical(virtual: usize) PagingError {
     }
 
     const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
-    if (!l1_entry.flags.present or l1_entry.flags.size != .small) return  .{ .not_present = .L1 };
+    if (!l1_entry.flags.present or l1_entry.flags.size != .small) return .{ .not_present = .L1 };
 
     return .{ .success = l1_entry.getAddress() + offset };
 }

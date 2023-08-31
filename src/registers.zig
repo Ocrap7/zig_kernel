@@ -18,13 +18,18 @@ pub const CR0 = packed struct {
     rest: u33,
 
     pub fn get() CR0 {
-        const address = asm volatile ("mov %cr0, %rax" : [ret] "={rax}" (-> u64));
+        const address = asm volatile ("mov %cr0, %rax"
+            : [ret] "={rax}" (-> u64),
+        );
         return @bitCast(address);
     }
 
     pub fn set(cr0: CR0) void {
         const ival: u64 = @bitCast(cr0);
-        asm volatile ("mov %rax, %cr0" :: [val] "{rax}" (ival));
+        asm volatile ("mov %rax, %cr0"
+            :
+            : [val] "{rax}" (ival),
+        );
     }
 };
 
@@ -42,7 +47,9 @@ pub const CR3 = packed struct {
     phys_addr: u52,
 
     pub fn get() CR3 {
-        const address = asm volatile ("mov %cr3, %rax" : [ret] "={rax}" (-> u64));
+        const address = asm volatile ("mov %cr3, %rax"
+            : [ret] "={rax}" (-> u64),
+        );
         return @bitCast(address);
     }
 
@@ -52,7 +59,10 @@ pub const CR3 = packed struct {
             .phys_addr = @truncate(@intFromPtr(addr) >> 12),
         };
         const ival: u64 = @bitCast(cr3);
-        asm volatile ("mov %rax, %cr4" :: [val] "{rax}" (ival));
+        asm volatile ("mov %rax, %cr4"
+            :
+            : [val] "{rax}" (ival),
+        );
     }
 };
 
@@ -85,13 +95,18 @@ pub const CR4 = packed struct {
     res4: u39,
 
     pub fn get() CR4 {
-        const address = asm volatile ("mov %cr4, %rax" : [ret] "={rax}" (-> u64));
+        const address = asm volatile ("mov %cr4, %rax"
+            : [ret] "={rax}" (-> u64),
+        );
         return @bitCast(address);
     }
 
     pub fn set(self: CR4) void {
         const ival: u64 = @bitCast(self);
-        asm volatile ("mov %rax, %cr4" :: [val] "{rax}" (ival));
+        asm volatile ("mov %rax, %cr4"
+            :
+            : [val] "{rax}" (ival),
+        );
     }
 };
 
@@ -133,7 +148,7 @@ pub const CpuFeatures = packed struct {
     f16c: bool,
     rdrandr: bool,
     hypervisor: bool,
-     
+
     /// EDX values
     fpu: bool,
     vme: bool,
@@ -168,55 +183,134 @@ pub const CpuFeatures = packed struct {
     ia64: bool,
     pbe: bool,
 
+    /// Querys all cpu features
     pub fn get() CpuFeatures {
-        return asm volatile ("cpuid; shlq $32, %rdx; shrdq $32, %rdx, %rcx" : [ret] "={rcx}" (-> CpuFeatures): [param] "{eax}" (1) : "ecx", "edx");
+        return asm volatile ("cpuid; shlq $32, %rdx; shrdq $32, %rdx, %rcx"
+            : [ret] "={rcx}" (-> CpuFeatures),
+            : [param] "{eax}" (1),
+            : "ecx", "edx"
+        );
     }
 };
 
 pub fn getIP() usize {
-    return asm volatile("lea (%rip), %rax" : [ret] "={rax}" (-> usize));
+    return asm volatile ("lea (%rip), %rax"
+        : [ret] "={rax}" (-> usize),
+    );
 }
 
-pub fn jumpIP(ip: usize, param: anytype) void {
-    asm volatile("push %rax; ret" :: [ip] "{rax}" (ip), [param] "{rcx}" (param));
+pub fn jumpIP(ip: usize, param: anytype) noreturn {
+    asm volatile ("push %rax; ret"
+        :
+        : [ip] "{rax}" (ip),
+          [param] "{rdi}" (param),
+    );
+
+    while (true) {}
 }
 
-pub fn sti() callconv(.Inline) void {
-    asm volatile("sti");
+/// Enable interrupts
+pub inline fn sti() void {
+    asm volatile ("sti");
 }
 
-pub fn cli() callconv(.Inline) void {
-    asm volatile("cli");
+/// Disable interrupts
+pub inline fn cli() void {
+    asm volatile ("cli");
 }
 
-pub fn mask_legacy_pic() callconv(.Inline) void {
-    asm volatile("outb %[mask], $0xA1; outb %[mask], $0x21" :: [mask] "{al}" (@as(u8, 0xFF)));
+/// Disable all interrupt pins on the legacy PIC
+pub inline fn mask_legacy_pic() void {
+    asm volatile ("outb %[mask], $0xA1; outb %[mask], $0x21"
+        :
+        : [mask] "{al}" (@as(u8, 0xFF)),
+    );
 }
 
 pub fn wait() void {
     out(0x80, @as(u8, 0));
 }
 
-pub fn out(comptime port: u16, value: anytype) callconv(.Inline) void {
+/// Write to the specified i/o port. `value` can be of size 1, 2, 4, or 8 bytes.
+pub inline fn out(port: u16, value: anytype) void {
     switch (@sizeOf(@TypeOf(value))) {
-        1 => asm volatile("outb %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
-        2 => asm volatile("outw %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
-        4 => asm volatile("outd %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
-        8 => asm volatile("outq %[val], %[reg]" :: [val] "r" (value), [reg] "n" (port)),
-        else => @panic("Unexpected type size")
+        1 => asm volatile ("outb %[val], %[reg]"
+            :
+            : [val] "r" (value),
+              [reg] "{dx}" (port),
+        ),
+        2 => asm volatile ("outw %[val], %[reg]"
+            :
+            : [val] "r" (value),
+              [reg] "{dx}" (port),
+        ),
+        4 => asm volatile ("outd %[val], %[reg]"
+            :
+            : [val] "r" (value),
+              [reg] "{dx}" (port),
+        ),
+        8 => asm volatile ("outq %[val], %[reg]"
+            :
+            : [val] "r" (value),
+              [reg] "{dx}" (port),
+        ),
+        else => @compileError("Unexpected type size"),
     }
 }
 
-pub fn in(comptime port: u16, comptime ty: type) ty {
+/// Read from the specified i/o port. `ty` can be of size 1, 2, 4, or 8 bytes.
+pub fn in(port: u16, comptime ty: type) ty {
     switch (@sizeOf(ty)) {
-        1 => return asm("inb %[reg], %[ret]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
-        2 => return asm("inw %[reg], %[ret]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
+        1 => return asm ("inb %[reg], %[ret]"
+            : [ret] "=r" (-> ty),
+            : [reg] "{dx}" (port),
+        ),
+        2 => return asm ("inw %[reg], %[ret]"
+            : [ret] "=r" (-> ty),
+            : [reg] "{dx}" (port),
+        ),
         // 4 => return asm("ind %[ret], %[reg]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
         // 8 => return asm("inq %[ret], %[reg]" : [ret] "=r" (-> ty) : [reg] "n" (port)),
-        else => @compileError("Unexpected type size")
+        else => @compileError("Unexpected type size"),
     }
 }
 
+/// Flush the paging translation lookahead buffer
 pub fn flush_tlb() void {
-    asm volatile("mov %cr3, %rax; mov %rax, %cr3");
+    asm volatile ("mov %cr3, %rax; mov %rax, %cr3");
+}
+
+/// Load the task state segment with `selector` in the GDT
+pub inline fn load_tss(selector: u16) void {
+    asm volatile ("ltr %[sel]"
+        :
+        : [sel] "r" (selector),
+    );
+}
+
+/// Set the value of the `cs` register
+pub inline fn set_cs(selector: u16) void {
+    _ = asm volatile (
+        \\push %[sel]
+        \\lea set_cs_out(%rip), %[tmp]
+        \\push %[tmp]
+        \\lretq
+        \\set_cs_out:
+        : [tmp] "=r" (-> usize),
+        : [sel] "r" (@as(u64, selector)),
+        : "memory"
+    );
+}
+
+/// Set the vlaue of all of the data segment registers (`ds`, `es`, `fs`, `gs`, `ss`)
+pub inline fn set_data_segments(selector: u16) void {
+    asm volatile (
+        \\movw %[sel], %ds
+        \\movw %[sel], %es
+        \\movw %[sel], %fs
+        \\movw %[sel], %gs
+        \\movw %[sel], %ss
+        :
+        : [sel] "{rax}" (selector),
+    );
 }
