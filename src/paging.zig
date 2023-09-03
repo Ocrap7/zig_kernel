@@ -1,3 +1,6 @@
+const std = @import("std");
+
+const config = @import("./config.zig");
 const log = @import("./logger.zig");
 const regs = @import("./registers.zig");
 const alloc = @import("./allocator.zig");
@@ -5,8 +8,8 @@ const assert = @import("std").debug.assert;
 
 /// Determines the accesibility of the page
 pub const PageTableMode = enum(u1) {
-    user,
-    kernel,
+    kernel = 0,
+    user = 1,
 };
 
 /// Determines the size of the page
@@ -360,4 +363,56 @@ pub fn mapPages1GB(physical: usize, virtual: usize, count: usize, flags: Mapping
     }
 
     return .{ .success = physical };
+}
+
+var KERNEL_HEADERS: std.BoundedArray(std.elf.Elf64_Phdr, 16) = std.BoundedArray(std.elf.Elf64_Phdr, 16).init(0) catch {
+    @compileError("Unexpected size");
+};
+
+pub fn addKernelHeader(header: std.elf.Elf64_Phdr) !void {
+    try KERNEL_HEADERS.append(header);
+}
+
+pub fn mapKernel() void {
+    for (KERNEL_HEADERS.constSlice()) |header| {
+        const exe = header.p_flags & std.elf.PF_X > 0;
+        _ = exe;
+        const flag_write = header.p_flags & std.elf.PF_W > 0;
+
+        var physical = &config.KERNEL.code[header.p_offset];
+
+        // .bss section doesn't have file contents, so instead we allocate the amount of memory it requires
+        if (header.p_filesz != header.p_memsz) {
+            const value = alloc.page_allocator.alloc(u8, header.p_memsz) catch {
+                log.panic("No memory left!", .{}, @src());
+            };
+
+            @memset(value, 0);
+            physical = @ptrCast(value);
+        }
+
+        switch (mapPages(@intFromPtr(physical), header.p_vaddr, header.p_memsz / 4097 + 1, .{ .writable = flag_write })) {
+            .success => |_| {
+                log.info("Mapped kernel page {x} {x} - {} {}", .{ header.p_offset, header.p_vaddr, header.p_memsz, flag_write }, @src());
+            },
+            else => |err| {
+                log.panic("Error mapping kernel: {}", .{err}, @src());
+            },
+        }
+    }
+
+    const kernel_page_count: usize = config.KERNEL_STACK_LENGTH / 4096;
+
+    for (0..kernel_page_count) |page| {
+        const addr = alloc.page_allocator.alloc(u8, 4096) catch {
+            log.panic("Unable to allocate kernel stack", .{}, @src());
+        };
+
+        switch (mapPage(@intFromPtr(addr.ptr), config.KERNEL_STACK_VIRTUAL_START - (page) * 4096, .{ .writable = true })) {
+            .success => |_| {},
+            else => |err| {
+                log.panic("Error mapping kernel stack: {}", .{err}, @src());
+            },
+        }
+    }
 }

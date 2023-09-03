@@ -114,7 +114,7 @@ comptime {
     assert(@bitSizeOf(CR4) == 64);
 }
 
-pub const CpuFeatures = packed struct {
+pub const CpuFeatures = packed struct(u64) {
     /// ECX values
     sse3: bool,
     pclmul: bool,
@@ -185,10 +185,10 @@ pub const CpuFeatures = packed struct {
 
     /// Querys all cpu features
     pub fn get() CpuFeatures {
-        return asm volatile ("cpuid; shlq $32, %rdx; shrdq $32, %rdx, %rcx"
+        return asm volatile ("cpuid; shlq $32, %rdx; or %rdx, %rcx"
             : [ret] "={rcx}" (-> CpuFeatures),
             : [param] "{eax}" (1),
-            : "ecx", "edx"
+            : "rcx", "rdx"
         );
     }
 };
@@ -199,10 +199,12 @@ pub fn getIP() usize {
     );
 }
 
-pub fn jumpIP(ip: usize, param: anytype) noreturn {
+pub fn jumpIP(ip: usize, sp: usize, param: anytype) noreturn {
     asm volatile ("push %rax; ret"
         :
         : [ip] "{rax}" (ip),
+          [sp] "{rsp}" (sp),
+          [bp] "{rbp}" (sp),
           [param] "{rdi}" (param),
     );
 

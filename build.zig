@@ -1,8 +1,18 @@
 const std = @import("std");
 const CrossTarget = @import("std").zig.CrossTarget;
 const Target = @import("std").Target;
+const RamDisk = @import("./RamDisk.zig");
+
+const drivers = @import("./drivers/build.zig");
+const ramdisk = @import("./src/ramdisk.zig");
 
 pub fn build(b: *std.build.Builder) void {
+    var ramdisk_step = RamDisk.create(b, .{});
+    drivers.build(b, ramdisk_step);
+
+    const install_ramdisk_step = b.addInstallFile(ramdisk_step.getOutput(), "ramdisk");
+    install_ramdisk_step.step.dependOn(&ramdisk_step.step);
+
     const exe = b.addExecutable(.{
         .name = "kernel",
         .root_source_file = .{ .path = "src/kernel.zig" },
@@ -17,6 +27,15 @@ pub fn build(b: *std.build.Builder) void {
     exe.pie = false;
     exe.force_pic = false;
     exe.code_model = .medium;
+    exe.step.dependOn(&install_ramdisk_step.step);
+
+    exe.addAnonymousModule("ramdisk", .{ .source_file = ramdisk_step.getOutput() });
+
+    const objcopy_step = exe.addObjCopy(.{ .basename = "kernel" });
+    const install_kernel_step = b.addInstallBinFile(objcopy_step.getOutput(), "kernel");
+    install_kernel_step.step.dependOn(&objcopy_step.step);
+
+    b.default_step.dependOn(&install_kernel_step.step);
 
     // the bootloader will setup basic functionality and depends on the kernel image
     const bootloader = b.addExecutable(.{
@@ -32,37 +51,65 @@ pub fn build(b: *std.build.Builder) void {
     bootloader.strip = false;
     bootloader.addAnonymousModule("kernel", .{ .source_file = exe.getOutputSource() });
 
+    b.verbose_llvm_ir = "output.ir";
     b.installArtifact(bootloader);
 
-    const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
-    run_step.addArgs(&.{"uefi-run"});
-    run_step.addArtifactArg(bootloader);
-    run_step.addArgs(&.{
+    var args = [_][]const u8{
         "-d",
+        // "-q", "../repos/qemu/build/x86_64-softmmu/qemu-system-x86_64",
         "--",
 
         // Debug logging
-        "-D", "qemu.log",
-        "-d", "int", 
+        "-D",
+        "qemu.log",
+        "-d",
+        "int",
 
         // Firmware
-        "-drive", "if=pflash,format=raw,readonly=on,file=ovmf-x64/OVMF_CODE-pure-efi.fd",
+        "-drive",
+        "if=pflash,format=raw,readonly=on,file=ovmf-x64/OVMF_CODE-pure-efi.fd",
 
         // System specs
-        "-machine", "q35",
-        "-m", "1024M",
+        "-machine",
+        "q35",
+        "-m",
+        "1024M",
+
+        "-device",
+        "virtio-mouse-pci",
 
         "-no-reboot",
 
         // Monitoring/debugging
         "-s",
-        // "-serial", "stdio",
+        // "-S",
+        "-serial",
+        "stdio",
         "-monitor",
         // "-serial",
         "tcp:127.0.0.1:55555,server,nowait",
-        "--nographic",
-    });
+        // "--nographic",
+    };
 
-    const step = b.step("run", "Runs the executable");
-    step.dependOn(&run_step.step);
+    {
+        const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
+        run_step.addArgs(&.{"uefi-run"});
+        run_step.addArtifactArg(bootloader);
+
+        run_step.addArgs(&args);
+        const step = b.step("run", "Runs the executable");
+        step.dependOn(&run_step.step);
+    }
+
+    {
+        const run_step = std.build.RunStep.create(b, "uefi-run bootx64");
+        run_step.addArgs(&.{"uefi-run"});
+        run_step.addArtifactArg(bootloader);
+
+        const debug_args = args ++ .{"-S"};
+        run_step.addArgs(&debug_args);
+
+        const step = b.step("debug", "Runs the executable");
+        step.dependOn(&run_step.step);
+    }
 }

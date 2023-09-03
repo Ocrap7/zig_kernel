@@ -122,7 +122,7 @@ pub const MADT = packed struct {
 
     pub const SIGNATURE = 0x43495041;
 
-    pub fn length(self: *const MADT) usize {
+    pub fn len(self: *const MADT) usize {
         return self.header.length - 0x2C;
     }
 

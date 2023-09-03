@@ -6,21 +6,10 @@ const paging = @import("./paging.zig");
 const regs = @import("./registers.zig");
 const alloc = @import("./allocator.zig");
 const acpi = @import("./acpi/acpi.zig");
+const config = @import("./config.zig");
 const kernel = @import("./kernel.zig");
 
 pub export const _fltused: i32 = 0;
-
-/// See build.zig where this is added as a module
-const KERNEL_CODE = @embedFile("kernel");
-
-/// this is a workaround to align the code on a page boundry.
-/// TODO: once embedfile is able to align, use that directly
-/// as this creates two copies of the data in memory
-fn kernel_code() type {
-    return struct { code: [KERNEL_CODE.len:0]u8 align(4096) };
-}
-
-const KERNEL: kernel_code() = .{ .code = KERNEL_CODE.* };
 
 pub fn main() uefi.Status {
     log.init();
@@ -56,7 +45,7 @@ pub fn main() uefi.Status {
 
     if (rsdp == null) log.panic("RSDP not found", .{}, @src());
 
-    var fbs = std.io.FixedBufferStream([]const u8){ .buffer = &KERNEL.code, .pos = 0 };
+    var fbs = std.io.FixedBufferStream([]const u8){ .buffer = &config.KERNEL.code, .pos = 0 };
 
     const headers = std.elf.Header.read(&fbs) catch {
         log.panic("Unable to read kernel elf file", .{}, @src());
@@ -69,35 +58,18 @@ pub fn main() uefi.Status {
     }) |header| {
         switch (header.p_type) {
             std.elf.PT_LOAD => {
-                const exe = header.p_flags & std.elf.PF_X > 0;
-                _ = exe;
-                const flag_write = header.p_flags & std.elf.PF_W > 0;
-
-                var physical = &KERNEL.code[header.p_offset];
-
-                // .bss section doesn't have file contents, so instead we allocate the amount of memory it requires
-                if (header.p_filesz != header.p_memsz) {
-                    const value = alloc.page_allocator.alloc(u8, header.p_memsz) catch {
-                        return .OutOfResources;
-                    };
-                    @memset(value, 0);
-                    physical = @ptrCast(value);
-                }
-
-                switch (paging.mapPages(@intFromPtr(physical), header.p_vaddr, header.p_memsz / 4097 + 1, .{ .writable = flag_write })) {
-                    .success => |_| {
-                        log.info("Mapped kernel page {x} {x} - {} {}", .{ header.p_offset, header.p_vaddr, header.p_memsz, flag_write }, @src());
-                    },
-                    else => |err| {
-                        log.panic("Error mapping kernel: {}", .{err}, @src());
-                    },
-                }
+                paging.addKernelHeader(header) catch {
+                    log.panic("Too many kernel headers!", .{}, @src());
+                };
             },
             else => {},
         }
     }
 
-    const kernel_params = kernel.KernelParams{
+    paging.mapKernel();
+    log.info("Mapped kernel", .{}, @src());
+
+    const kernel_params = config.KernelParams{
         .rsdt = @ptrFromInt(rsdp.?.rsdt),
         .xsdt = @ptrFromInt(rsdp.?.xsdt),
 
@@ -106,5 +78,5 @@ pub fn main() uefi.Status {
     };
 
     // Jumping to kernel entry with parameters
-    regs.jumpIP(headers.entry, &kernel_params);
+    regs.jumpIP(headers.entry, config.KERNEL_STACK_VIRTUAL_START, &kernel_params);
 }

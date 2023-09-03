@@ -21,7 +21,7 @@ pub fn init() void {
         log.panic("Faulty serial port", .{}, @src());
     }
 
-    regs.out(PORT + 4, @as(u8, 0x07));
+    regs.out(PORT + 4, @as(u8, 0x0F));
 }
 
 pub fn read() u8 {

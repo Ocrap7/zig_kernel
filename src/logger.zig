@@ -25,7 +25,7 @@ pub const Logger = struct {
 };
 
 /// If set, the program is in the kernel binary
-var KERNEL: bool = false;
+pub var KERNEL: bool = false;
 
 /// This should be called once at the start of the kernel entry point
 pub fn set_kernel() void {

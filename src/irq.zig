@@ -5,6 +5,7 @@ const acpi = @import("./acpi/acpi.zig");
 const log = @import("./logger.zig");
 const paging = @import("./paging.zig");
 const gdt = @import("./gdt.zig");
+const apic = @import("./lapic.zig");
 
 const GateType = enum(u4) {
     Interrupt = 0xE,
@@ -65,174 +66,18 @@ pub const ISRFrame = extern struct {
     vector: u64,
     error_code: u64,
 
-    rip: usize,
+    rip: u64,
     cs: u64,
     rflags: u64,
-    rsp: usize,
+    rsp: u64,
     ss: u64,
 };
 
-const Apic = struct {
-    pub const CONTROL_BASE: usize = 0xFEE00000;
-    pub const Register = enum(u16) {
-        LapicId = 0x20,
-        LapicVersion = 0x30,
-        TaskPriority = 0x80,
-        ArbitrationPriority = 0x90,
-        ProcessorPriority = 0xA0,
-        EOI = 0xB0,
-        RemoteRead = 0xC0,
-        LocalDestination = 0xD0,
-        DestinationFormat = 0xE0,
-        SpuriousVector = 0xF0,
-        InService = 0x100,
-        TriggerMode = 0x180,
-        InterruptRequest = 0x200,
-        ErrorStatus = 0x280,
-        CMCI = 0x2F0,
-        IntCommandLow = 0x300,
-        IntCommandHigh = 0x310,
-        LVTTimer = 0x320,
-        LVTThermalSensor = 0x330,
-        LVTPCINT = 0x340,
-        LVTLINT0 = 0x350,
-        LVTLINT1 = 0x360,
-        LVTError = 0x370,
-        InitialCount = 0x380,
-        CurrentCount = 0x390,
-        DivideConfiguration = 0x3E0,
-    };
+pub const IRQHandler = *const fn () bool;
 
-    pub fn read(register: Register, comptime return_ty: type) return_ty {
-        const ptr: *return_ty = @ptrFromInt(CONTROL_BASE + @as(usize, @intFromEnum(register)));
-        return ptr.*;
-    }
+var irq_handlers: [256]?std.ArrayList(IRQHandler) = .{null} ** 256;
 
-    pub fn write(register: Register, comptime value: anytype) void {
-        const ptr: *@TypeOf(value) = @ptrFromInt(CONTROL_BASE + @as(usize, @intFromEnum(register)));
-        ptr.* = value;
-        _ = ptr.*;
-    }
-};
-
-pub const IOApic = struct {
-    pub const DeliveryMode = enum(u3) {
-        Fixed = 0b000,
-        Lowest = 0b001,
-        SMI = 0b010,
-        NMI = 0b100,
-        INIT = 0b101,
-        ExtINIT = 0b111,
-    };
-
-    pub const DestinationMode = enum(u1) {
-        Physical = 0,
-        Logical = 1,
-    };
-
-    pub const Polarity = enum(u1) {
-        ActiveHigh,
-        ActiveLow,
-    };
-
-    pub const TriggerMode = enum(u1) {
-        Edge,
-        Level,
-    };
-
-    pub const RedirectionEntry = packed struct {
-        /// The Interrupt vector that will be raised on the specified CPU(s).
-        vector: u8,
-        /// How the interrupt will be sent to the CPU(s).
-        delivery_mode: DeliveryMode = .Fixed,
-        /// Specify how the Destination field shall be interpreted.
-        destination_mode: DestinationMode = .Physical,
-        /// If clear, the IRQ is just relaxed and waiting for something to happen (or it has fired and already processed by Local APIC(s)).
-        /// If set, it means that the IRQ has been sent to the Local APICs but it's still waiting to be delivered.
-        delivery_status: bool = false,
-        /// For ISA IRQs assume Active High unless otherwise specified in Interrupt Source Override descriptors of the MADT or in the MP Tables.
-        polarity: Polarity = .ActiveHigh,
-        remoteIRR: u1 = 0,
-        /// For ISA IRQs assume Edge unless otherwise specified in Interrupt Source Override descriptors of the MADT or in the MP Tables.
-        trigger_mode: TriggerMode = .Edge,
-        // Temporarily disable this IRQ by setting this, and reenable it by clearing.
-        masked: bool,
-        unused: u39 = 0,
-        /// This field is interpreted according to the Destination Format bit.
-        /// If Physical destination is choosen, then this field is limited to bits 56 - 59 (only 16 CPUs addressable). You put here the APIC ID of the CPU that you want to receive the interrupt.
-        destination: u8,
-    };
-
-    pub const Register = union(enum(u32)) {
-        IOAPICID = 0,
-        IOAPICVER = 1,
-        IOAPICARB = 2,
-        Redirection: u16,
-    };
-
-    base: usize,
-
-    /// Reads a value from the ioapic register
-    pub fn read(self: *IOApic, register: Register, comptime return_ty: type) return_ty {
-        // Volatile is needed on these two ptrs so that the first read isn't optimized out
-        const iosel: *volatile u32 = @ptrFromInt(self.base);
-        const iodata: *volatile u32 = @ptrFromInt(self.base + 0x10);
-
-        const offset: u32 = switch (register) {
-            .IOAPICID => 0,
-            .IOAPICVER => 1,
-            .IOAPICARB => 2,
-            .Redirection => |i| {
-                var values: [2]u32 = .{ 0, 0 };
-
-                iosel.* = 0x10 + i * 2;
-                values[0] = iodata.*;
-
-                iosel.* = 0x10 + i * 2 + 1;
-                values[1] = iodata.*;
-
-                const value: *return_ty = @ptrCast(@alignCast(&values));
-
-                return value.*;
-            },
-        };
-
-        iosel.* = offset;
-        const iodata_val: *volatile return_ty = @ptrCast(@alignCast(iodata));
-        return iodata_val.*;
-    }
-
-    /// Write some value to the specified ioapic register
-    pub fn write(self: *IOApic, register: Register, value: anytype) void {
-        // Volatile is needed on these two ptrs so that the first write isn't optimized out
-        const iosel: *volatile u32 = @ptrFromInt(self.base);
-        const iodata: *volatile u32 = @ptrFromInt(self.base + 0x10);
-
-        const offset: u32 = switch (register) {
-            .IOAPICID => 0,
-            .IOAPICVER => 1,
-            .IOAPICARB => 2,
-            .Redirection => |i| {
-                const values: [*]const u32 = @ptrCast(@alignCast(&value));
-
-                iosel.* = 0x10 + i * 2;
-                iodata.* = values[0];
-
-                iosel.* = 0x10 + i * 2 + 1;
-                iodata.* = values[1];
-
-                return;
-            },
-        };
-
-        iosel.* = offset;
-        const iodata_val: *volatile @TypeOf(value) = @ptrCast(@alignCast(iodata));
-        iodata_val.* = value;
-    }
-};
-
-pub export fn isr_handler(frame: *const ISRFrame) void {
-    regs.cli();
+export fn isr_handler(frame: *ISRFrame) callconv(.C) u64 {
     switch (frame.vector) {
         0x3 => {
             log.panic("Breakpoint", .{}, @src());
@@ -241,11 +86,30 @@ pub export fn isr_handler(frame: *const ISRFrame) void {
             log.panic("GPF", .{}, @src());
         },
         else => {
-            log.info("Interrupt: {x}", .{frame.vector}, @src());
-            Apic.write(.EOI, @as(u32, 0));
+            log.info("Interrupt: 0x{x} 0x{x}", .{ frame.vector, frame.rflags }, @src());
+
+            var handler = &irq_handlers[frame.vector];
+            var handled = false;
+
+            if (handler.*) |handlers| {
+                for (handlers.items) |hand| {
+                    if (hand()) {
+                        handled = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!handled) {
+                log.warn("Unhandled interrupt 0x{x}", .{frame.vector}, @src());
+            }
+
+            apic.cpuApic().write(.EOI, @as(u32, 0));
         },
     }
-    regs.sti();
+    // frame.rflags &= ~@as(u64, 0x200);
+
+    return @intFromPtr(frame);
 }
 
 const PIC1: u16 = 0x20;
@@ -267,124 +131,78 @@ const ICW4_BUF_SLAVE: u8 = 0x08;
 const ICW4_BUF_MASTER: u8 = 0x0C;
 const ICW4_SFNM: u8 = 0x10;
 
-pub fn init(xsdt: *align(1) const acpi.XSDT) void {
-    _ = xsdt;
-    // regs.out(23, @as(u8, 45));
-    // _ = regs.in(23, u8);
-    // const a1 = regs.in(PIC)
-    regs.cli();
-    // _ = asm ("in %[ret], %[reg]" : [ret] "=r" (-> u32) : [reg] "n" (4));
-    const a1 = regs.in(PIC1_DATA, u8);
-    const a2 = regs.in(PIC2_DATA, u8); // save masks
-    // const a2: u8 = regs.in(PIC2_DATA, u8);
+// pub fn init2(xsdt: *const acpi.XSDT) void {
+//     if (regs.CpuFeatures.get().apic) log.panic("CPU does not support APIC", .{}, @src());
 
-    regs.out(PIC1_COMMAND, ICW1_INIT | ICW1_ICW4); // starts the initialization sequence (in cascade mode)
-    regs.wait();
-    regs.out(PIC2_COMMAND, ICW1_INIT | ICW1_ICW4);
-    regs.wait();
+//     regs.cli();
+//     regs.mask_legacy_pic();
 
-    regs.out(PIC1_DATA, @as(u8, 0x20)); // ICW2: Master PIC vector offset
-    regs.wait();
-    regs.out(PIC2_DATA, @as(u8, 0x28)); // ICW2: Slave PIC vector offset
-    regs.wait();
+//     Apic.write(.SpuriousVector, @as(packed struct { offset: u8, enable: bool }, .{ .offset = 0xFF, .enable = true }));
 
-    regs.out(PIC1_DATA, @as(u8, 4)); // ICW3: tell Master PIC that there is a slave PIC at IRQ2 (0000 0100)
-    regs.wait();
-    regs.out(PIC2_DATA, @as(u8, 2)); // ICW3: tell Slave PIC its cascade identity (0000 0010)
-    regs.wait();
+//     Apic.write(.LVTTimer, @as(u32, 32 | 0x20000));
+//     Apic.write(.DivideConfiguration, @as(u32, 0xB));
+//     Apic.write(.InitialCount, @as(u32, 10000000));
 
-    regs.out(PIC1_DATA, ICW4_8086); // ICW4: have the PICs use 8086 mode (and not 8080 mode)
-    regs.wait();
-    regs.out(PIC2_DATA, ICW4_8086);
-    regs.wait();
+//     Apic.write(.LVTPCINT, @as(u32, 0x10000));
 
-    regs.out(PIC1_DATA, a1); // restore saved masks.
-    regs.wait();
-    regs.out(PIC2_DATA, a2);
-    regs.wait();
+//     Apic.write(.LVTLINT0, @as(u32, 0x10000));
+//     Apic.write(.LVTLINT1, @as(u32, 0x10000));
 
-    IDT_DESCRIPTOR.base = @intFromPtr(&GLOBAL_IDT);
-    IDT_DESCRIPTOR.size = 256 * @sizeOf(IDTEntry) - 1;
+//     Apic.write(.ErrorStatus, @as(u32, 0));
+//     Apic.write(.ErrorStatus, @as(u32, 0));
 
-    init_idt_impl();
-    asm volatile ("lidt (%[idtr])"
-        :
-        : [idtr] "r" (@intFromPtr(&IDT_DESCRIPTOR)),
-    );
-}
+//     Apic.write(.EOI, @as(u32, 0));
 
-pub fn init2(xsdt: *const acpi.XSDT) void {
-    if (regs.CpuFeatures.get().apic) log.panic("CPU does not support APIC", .{}, @src());
+//     Apic.write(.IntCommandLow, @as(u32, 0x88500));
+//     Apic.write(.IntCommandHigh, @as(u32, 0x0));
 
-    regs.cli();
-    regs.mask_legacy_pic();
+//     while (Apic.read(.IntCommandLow, u32) & 0x1000 != 0) {}
 
-    Apic.write(.SpuriousVector, @as(packed struct { offset: u8, enable: bool }, .{ .offset = 0xFF, .enable = true }));
+//     Apic.write(.TaskPriority, @as(u32, 0));
 
-    Apic.write(.LVTTimer, @as(u32, 32 | 0x20000));
-    Apic.write(.DivideConfiguration, @as(u32, 0xB));
-    Apic.write(.InitialCount, @as(u32, 10000000));
+//     const madt = xsdt.madt() orelse log.panic("Unable to get madt from xsdt", .{}, @src());
 
-    Apic.write(.LVTPCINT, @as(u32, 0x10000));
+//     var apic_id: ?u8 = null;
+//     var ioapic_address: ?usize = null;
 
-    Apic.write(.LVTLINT0, @as(u32, 0x10000));
-    Apic.write(.LVTLINT1, @as(u32, 0x10000));
+//     const len = madt.length();
+//     var offset: usize = 0;
+//     while (offset < len) {
+//         const entry = madt.next_entry(offset);
 
-    Apic.write(.ErrorStatus, @as(u32, 0));
-    Apic.write(.ErrorStatus, @as(u32, 0));
+//         switch (entry) {
+//             .local_apic => |val| {
+//                 apic_id = val.apic_id;
+//                 log.writer().print("LocalApic@{}\n", .{val}) catch {};
+//             },
+//             .io_apic => |val| {
+//                 ioapic_address = val.io_apic_address;
+//                 log.writer().print("IOAPIC@{X}\n", .{val.io_apic_address}) catch {};
+//                 // break;
+//             },
+//             else => {},
+//         }
 
-    Apic.write(.EOI, @as(u32, 0));
+//         offset += entry.len();
+//     }
 
-    Apic.write(.IntCommandLow, @as(u32, 0x88500));
-    Apic.write(.IntCommandHigh, @as(u32, 0x0));
+//     var ioapic = IOApic{ .base = ioapic_address.? };
+//     _ = ioapic;
 
-    while (Apic.read(.IntCommandLow, u32) & 0x1000 != 0) {}
+//     // ioapic.write(. { .Redirection = 0 }, IOApic.RedirectionEntry{
+//     //     .vector = 0x20,
+//     //     .destination = apic_id.?,
+//     //     .masked = true,
+//     // });
 
-    Apic.write(.TaskPriority, @as(u32, 0));
+//     // ioapic.write(. { .Redirection = 7 }, IOApic.RedirectionEntry{
+//     //     .vector = 0x27,
+//     //     .destination = apic_id.?,
+//     //     .masked = false,
+//     // });
 
-    const madt = xsdt.madt() orelse log.panic("Unable to get madt from xsdt", .{}, @src());
-
-    var apic_id: ?u8 = null;
-    var ioapic_address: ?usize = null;
-
-    const len = madt.length();
-    var offset: usize = 0;
-    while (offset < len) {
-        const entry = madt.next_entry(offset);
-
-        switch (entry) {
-            .local_apic => |val| {
-                apic_id = val.apic_id;
-                log.writer().print("LocalApic@{}\n", .{val}) catch {};
-            },
-            .io_apic => |val| {
-                ioapic_address = val.io_apic_address;
-                log.writer().print("IOAPIC@{X}\n", .{val.io_apic_address}) catch {};
-                // break;
-            },
-            else => {},
-        }
-
-        offset += entry.len();
-    }
-
-    var ioapic = IOApic{ .base = ioapic_address.? };
-    _ = ioapic;
-
-    // ioapic.write(. { .Redirection = 0 }, IOApic.RedirectionEntry{
-    //     .vector = 0x20,
-    //     .destination = apic_id.?,
-    //     .masked = true,
-    // });
-
-    // ioapic.write(. { .Redirection = 7 }, IOApic.RedirectionEntry{
-    //     .vector = 0x27,
-    //     .destination = apic_id.?,
-    //     .masked = false,
-    // });
-
-    asm volatile ("int3");
-}
+//     asm volatile ("int3");
+// }
 
 pub fn init_idt() void {
     init_idt_impl();
@@ -396,6 +214,20 @@ pub fn init_idt() void {
         : [idtr] "r" (&IDT_DESCRIPTOR),
         : "memory"
     );
+}
+
+const ioapic = @import("./ioapic.zig");
+
+pub fn register_handler(handler: IRQHandler, vector: u8, irq: u16) void {
+    _ = irq;
+    var allocator = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false }){};
+
+    if (irq_handlers[vector]) |_| {
+        irq_handlers[vector].?.append(handler) catch {};
+    } else {
+        irq_handlers[vector] = std.ArrayList(IRQHandler).init(allocator.allocator());
+        irq_handlers[vector].?.append(handler) catch {};
+    }
 }
 
 fn init_idt_impl() void {
@@ -669,8 +501,9 @@ comptime {
         \\    push %rdx   
         \\    push %rsi   
         \\    push %rdi   
-        \\    mov %rsp, %rcx
+        \\    mov %rsp, %rdi
         \\    call isr_handler
+        \\    mov %rax, %rsp
         \\    pop %rdi
         \\    pop %rsi
         \\    pop %rdx
@@ -678,7 +511,7 @@ comptime {
         \\    pop %rbx
         \\    pop %rax  
         \\    add $16, %rsp
-        \\    iret
+        \\    iretq
     );
 
     asm (
@@ -690,8 +523,9 @@ comptime {
         \\    push %rdx   
         \\    push %rsi   
         \\    push %rdi   
-        \\    mov %rsp, %rcx
+        \\    mov %rsp, %rdi
         \\    call isr_handler
+        \\    mov %rax, %rsp
         \\    pop %rdi
         \\    pop %rsi
         \\    pop %rdx
@@ -699,14 +533,13 @@ comptime {
         \\    pop %rbx
         \\    pop %rax  
         \\    add $8, %rsp
-        \\    iret
+        \\    iretq
     );
 }
 
 inline fn isr_stub(comptime vector: u64) void {
-    // asm volatile ("1: jmp 1b");
     asm volatile (
-    // \\cli
+        \\cli
         \\pushq $0   
         \\pushq %[vector]
         \\jmp isr_stub_next
@@ -717,7 +550,7 @@ inline fn isr_stub(comptime vector: u64) void {
 
 inline fn isr_stub_err(comptime vector: u64) void {
     asm volatile (
-    // \\cli
+        \\cli
         \\pushq %[vector]
         \\jmp isr_stub_next_err
         :
