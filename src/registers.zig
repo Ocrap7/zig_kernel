@@ -33,6 +33,18 @@ pub const CR0 = packed struct {
     }
 };
 
+pub const CR2 = packed struct {
+    value: u64,
+
+    pub fn get() CR2 {
+        const address = asm volatile ("mov %cr2, %rax"
+            : [ret] "={rax}" (-> u64),
+        );
+
+        return @bitCast(address);
+    }
+};
+
 pub const CR3 = packed struct {
     low: packed union {
         attrs: packed struct {
@@ -203,8 +215,8 @@ pub fn jumpIP(ip: usize, sp: usize, param: anytype) noreturn {
     asm volatile ("push %rax; ret"
         :
         : [ip] "{rax}" (ip),
-          [sp] "{rsp}" (sp),
-          [bp] "{rbp}" (sp),
+          [sp] "{rsp}" (sp - 8),
+          [bp] "{rbp}" (sp - 8),
           [param] "{rdi}" (param),
     );
 
@@ -314,5 +326,30 @@ pub inline fn set_data_segments(selector: u16) void {
         \\movw %[sel], %ss
         :
         : [sel] "{rax}" (selector),
+    );
+}
+
+pub inline fn setMSR(register: u32, value: anytype) void {
+    if (@sizeOf(@TypeOf(value)) != 8) {
+        @compileError("Expected MSR value to be 64 bits wide!");
+    }
+
+    asm volatile ("shrq $32, %[high]; wrmsr"
+        :
+        : [low] "{rax}" (value),
+          [high] "{rdx}" (value),
+          [reg] "{rcx}" (register),
+    );
+}
+
+pub inline fn getMSR(register: u32, Value: type) Value {
+    if (@sizeOf(Value) != 8) {
+        @compileError("Expected MSR value to be 64 bits wide!");
+    }
+
+    return asm volatile ("rdmsr; shlq $32, %rdx; or %rdx, %rax"
+        : [ret] "={rax}" (-> Value),
+        : [reg] "{rcx}" (register)
+        : "rdx"
     );
 }

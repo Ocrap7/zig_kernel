@@ -2,6 +2,7 @@ const std = @import("std");
 const CrossTarget = @import("std").zig.CrossTarget;
 const Target = @import("std").Target;
 const RamDisk = @import("./RamDisk.zig");
+const CodeStrip = @import("./CodeStrip.zig");
 
 const drivers = @import("./drivers/build.zig");
 const ramdisk = @import("./src/ramdisk.zig");
@@ -31,11 +32,21 @@ pub fn build(b: *std.build.Builder) void {
 
     exe.addAnonymousModule("ramdisk", .{ .source_file = ramdisk_step.getOutput() });
 
-    const objcopy_step = exe.addObjCopy(.{ .basename = "kernel" });
-    const install_kernel_step = b.addInstallBinFile(objcopy_step.getOutput(), "kernel");
-    install_kernel_step.step.dependOn(&objcopy_step.step);
+    {
+        const objcopy_step = exe.addObjCopy(.{ .basename = "kernel" });
+        const install_kernel_step = b.addInstallBinFile(objcopy_step.getOutput(), "kernel");
+        install_kernel_step.step.dependOn(&objcopy_step.step);
 
-    b.default_step.dependOn(&install_kernel_step.step);
+        b.default_step.dependOn(&install_kernel_step.step);
+
+        const code_strip_step = CodeStrip.create(b, .{});
+        code_strip_step.step.dependOn(&install_kernel_step.step);
+
+        const install_symbols = b.addInstallBinFile(code_strip_step.getOutput(), "../kernel-symbols.o");
+        install_symbols.step.dependOn(&code_strip_step.step);
+
+        b.default_step.dependOn(&install_symbols.step);
+    }
 
     // the bootloader will setup basic functionality and depends on the kernel image
     const bootloader = b.addExecutable(.{
@@ -51,7 +62,6 @@ pub fn build(b: *std.build.Builder) void {
     bootloader.strip = false;
     bootloader.addAnonymousModule("kernel", .{ .source_file = exe.getOutputSource() });
 
-    b.verbose_llvm_ir = "output.ir";
     b.installArtifact(bootloader);
 
     var args = [_][]const u8{
@@ -112,4 +122,17 @@ pub fn build(b: *std.build.Builder) void {
         const step = b.step("debug", "Runs the executable");
         step.dependOn(&run_step.step);
     }
+}
+
+fn generate_symbols(b: *std.build.Builder, step: *std.build.Step, src: []const u8, dst: []const u8) !void {
+    var argv = std.ArrayList([]const u8).init(b.allocator);
+    try argv.appendSlice(&.{"objcopy"});
+    // try argv.appendSlice(&.{ "-O", "lib" });
+    try argv.appendSlice(&.{ "-j", ".text" });
+    try argv.appendSlice(&.{"-x"});
+    try argv.appendSlice(&.{"--extract-symbol"});
+
+    try argv.appendSlice(&.{ src, dst });
+
+    _ = try step.evalChildProcess(argv.items);
 }

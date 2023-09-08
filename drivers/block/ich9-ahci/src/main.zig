@@ -1,5 +1,12 @@
 const driver = @import("driver");
+const kernel = @import("kernel");
+const std = @import("std");
+
+comptime {
+    _ = driver;
+}
 
 export fn main() void {
-    _ = driver.add(2, 3);
+    kernel.name.kernel_func();
+    while (true) {}
 }

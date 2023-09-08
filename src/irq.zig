@@ -85,6 +85,32 @@ export fn isr_handler(frame: *ISRFrame) callconv(.C) u64 {
         0xD => {
             log.panic("GPF", .{}, @src());
         },
+        0xE => {
+            var buf = [_]u8{0} ** 64;
+
+            var fba = std.heap.FixedBufferAllocator.init(&buf);
+            var error_format = std.ArrayList(u8).init(fba.allocator());
+
+            if (frame.error_code & 1 > 0) {
+                error_format.appendSlice(", Page Protection") catch {};
+            }
+            if (frame.error_code & 0b10 > 0) {
+                error_format.appendSlice(", Write") catch {};
+            } else {
+                error_format.appendSlice(", Read") catch {};
+            }
+            if (frame.error_code & 0b100 > 0) {
+                error_format.appendSlice(", CPL=3") catch {};
+            }
+            if (frame.error_code & 0b1000 > 0) {
+                error_format.appendSlice(", Reserved Write") catch {};
+            }
+            if (frame.error_code & 0b10000 > 0) {
+                error_format.appendSlice(", Executed") catch {};
+            }
+
+            log.panic("Page fault: 0x{x}{s}", .{ regs.CR2.get().value, error_format.items }, @src());
+        },
         else => {
             log.info("Interrupt: 0x{x} 0x{x}", .{ frame.vector, frame.rflags }, @src());
 
@@ -502,6 +528,7 @@ comptime {
         \\    push %rsi   
         \\    push %rdi   
         \\    mov %rsp, %rdi
+        \\    pushq $0 // Align stack
         \\    call isr_handler
         \\    mov %rax, %rsp
         \\    pop %rdi
@@ -524,6 +551,7 @@ comptime {
         \\    push %rsi   
         \\    push %rdi   
         \\    mov %rsp, %rdi
+        \\    pushq $0 // Align stack
         \\    call isr_handler
         \\    mov %rax, %rsp
         \\    pop %rdi

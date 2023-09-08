@@ -1,6 +1,9 @@
 const std = @import("std");
 const uefi = std.os.uefi;
 const log = @import("./logger.zig");
+const config = @import("./config.zig");
+const paging = @import("./paging.zig");
+const schedular = @import("./schedular.zig");
 
 /// This is temporary as the std lib doesn't have the last reserved field
 pub const MemoryDescriptor = extern struct {
@@ -32,7 +35,7 @@ pub const MappedPages = struct {
 };
 
 /// Keeps track of mapped pages
-var alloc_page: MappedPages = .{
+var mapped_pages: MappedPages = .{
     .descriptor = 0,
     .offset = 0,
 };
@@ -41,7 +44,7 @@ pub fn copyMemoryMap(map: []MemoryDescriptor, alloc_page_map: MappedPages) void 
     @memcpy(MEMORY_MAP[0..map.len], map);
     MEMORY_MAP_SIZE = map.len;
 
-    alloc_page = alloc_page_map;
+    mapped_pages = alloc_page_map;
 }
 
 pub fn getMemoryMap() []MemoryDescriptor {
@@ -49,7 +52,7 @@ pub fn getMemoryMap() []MemoryDescriptor {
 }
 
 pub fn getMappedPages() MappedPages {
-    return alloc_page;
+    return mapped_pages;
 }
 
 /// Returns the memory descriptor type in a human readable string
@@ -118,7 +121,7 @@ pub fn initMemoryMap() uefi.Status {
     const num_descs = size / @sizeOf(MemoryDescriptor);
     MEMORY_MAP_SIZE = num_descs;
 
-    alloc_page.descriptor = next_usable_descriptor() orelse return .OutOfResources;
+    mapped_pages.descriptor = next_usable_descriptor() orelse return .OutOfResources;
 
     return .Success;
 }
@@ -141,7 +144,7 @@ pub const MemoryStats = struct {
                 n_pages += desc.number_of_pages;
             }
 
-            if (i < alloc_page.descriptor) {
+            if (i < mapped_pages.descriptor) {
                 n_used_pages += desc.number_of_pages;
             }
         }
@@ -164,15 +167,22 @@ pub const vtable = std.mem.Allocator.VTable{
     .free = free,
 };
 
-pub const page_allocator = std.mem.Allocator{
+var freed_allocations = blk: {
+    var buffer: [1024 * 1024]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+
+    break :blk std.ArrayList(struct { start: u64, len: u64 }).init(fba.allocator());
+};
+
+pub const physical_page_allocator = std.mem.Allocator{
     .ptr = undefined,
     .vtable = &vtable,
 };
 
 /// Gets the next usable memory descriptor in the memory map starting at the index `alloc_page.descriptor`
 fn next_usable_descriptor() ?usize {
-    const map = getMemoryMap()[alloc_page.descriptor + 1 ..];
-    for (map, alloc_page.descriptor + 1..) |desc, i| {
+    const map = getMemoryMap()[mapped_pages.descriptor + 1 ..];
+    for (map, mapped_pages.descriptor + 1..) |desc, i| {
         switch (desc.type) {
             .BootServicesCode, .BootServicesData, .ConventionalMemory => return i,
             else => {},
@@ -182,6 +192,22 @@ fn next_usable_descriptor() ?usize {
     return null;
 }
 
+pub fn allocPage() ?[*]u8 {
+    const desc = &getMemoryMap()[mapped_pages.descriptor];
+
+    if (mapped_pages.offset >= desc.number_of_pages) {
+        mapped_pages.descriptor = next_usable_descriptor() orelse return null;
+        mapped_pages.offset = 0;
+    }
+
+    const used_desc = &getMemoryMap()[mapped_pages.descriptor];
+    const offset = used_desc.physical_start + mapped_pages.offset * 4096;
+
+    mapped_pages.offset += 1;
+
+    return @ptrFromInt(offset);
+}
+
 fn alloc(_: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
     _ = ra;
     _ = log2_align;
@@ -189,18 +215,18 @@ fn alloc(_: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
     // n - 1 because otherwise if n is 4096, 2 pages would be mapped
     const pages = (n - 1) / 4096 + 1;
 
-    const desc = &getMemoryMap()[alloc_page.descriptor];
+    const desc = &getMemoryMap()[mapped_pages.descriptor];
 
-    if (pages + alloc_page.offset > desc.number_of_pages) {
-        alloc_page.descriptor = next_usable_descriptor() orelse return null;
-        alloc_page.offset = 0;
+    if (pages + mapped_pages.offset > desc.number_of_pages) {
+        mapped_pages.descriptor = next_usable_descriptor() orelse return null;
+        mapped_pages.offset = 0;
     }
 
-    const used_desc = &getMemoryMap()[alloc_page.descriptor];
-    const offset = used_desc.physical_start + alloc_page.offset * 4096;
+    const used_desc = &getMemoryMap()[mapped_pages.descriptor];
+    const offset = used_desc.physical_start + mapped_pages.offset * 4096;
 
-    alloc_page.offset += pages;
-
+    mapped_pages.offset += pages;
+    
     return @ptrFromInt(offset);
 }
 
@@ -219,8 +245,96 @@ fn resize(
     return false;
 }
 
-fn free(_: *anyopaque, slice: []u8, log2_buf_align: u8, return_address: usize) void {
+fn free(address: *anyopaque, slice: []u8, log2_buf_align: u8, return_address: usize) void {
+    _ = address;
+    _ = log2_buf_align;
+    _ = return_address;
+
+    freed_allocations.append(.{ .start = @intFromPtr(slice.ptr), .len = @as(u64, slice.len - 1) / 4096 + 1 }) catch {};
+}
+
+pub const virtual_vtable = std.mem.Allocator.VTable{
+    .alloc = virtual_alloc,
+    .resize = virtual_resize,
+    .free = virtual_free,
+};
+
+pub const virtual_page_allocator = std.mem.Allocator{
+    .ptr = undefined,
+    .vtable = &virtual_vtable,
+};
+
+var kernel_heap = config.KERNEL_HEAP_START;
+
+pub fn remapKernelHeap(from: *paging.PageTable, into: *paging.PageTable) void {
+    const l4_index = (config.KERNEL_HEAP_START >> 39) & 0x1FF;
+
+    into.entries[l4_index] = from.entries[l4_index];
+}
+
+pub fn allocVirtualPage() *anyopaque {
+    const base = if (schedular.schedular.current_process) |proc|
+        proc.data.heap_base
+    else
+        @as(u64, kernel_heap);
+
+    if (schedular.schedular.current_process) |proc| {
+        proc.data.heap_base += 4096;
+    } else {
+        kernel_heap += 4096;
+    }
+
+    return @ptrFromInt(base);
+}
+
+fn virtual_alloc(_: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
+    _ = ra;
+    _ = log2_align;
+
+    const pages = (n - 1) / 4096 + 1;
+    const base = if (schedular.schedular.current_process) |proc|
+        proc.data.heap_base
+    else
+        @as(u64, kernel_heap);
+
+    if (schedular.schedular.current_process) |proc| {
+        proc.data.heap_base += pages * 4096;
+    } else {
+        kernel_heap += pages * 4096;
+    }
+
+    const pt = paging.getPageTable();
+    _ = pt;
+
+    for (0..pages) |i| {
+        const physical = allocPage() orelse return null;
+
+        const res = paging.mapPage(@intFromPtr(physical), base + 4096 * i, .{ .writable = true });
+        log.info("Page {}", .{res}, @src());
+    }
+
+
+    return @ptrFromInt(base);
+}
+
+fn virtual_resize(
+    _: *anyopaque,
+    buf_unaligned: []u8,
+    log2_buf_align: u8,
+    new_size: usize,
+    return_address: usize,
+) bool {
+    _ = buf_unaligned;
+    _ = log2_buf_align;
+    _ = return_address;
+    _ = new_size;
+
+    return false;
+}
+
+fn virtual_free(address: *anyopaque, slice: []u8, log2_buf_align: u8, return_address: usize) void {
     _ = slice;
+    _ = address;
     _ = log2_buf_align;
     _ = return_address;
 }

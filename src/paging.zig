@@ -53,6 +53,10 @@ pub const PageTableEntry = packed struct {
         return self.address << 12;
     }
 
+    pub fn getAddressEntry(self: *const PageTableEntry) *PageTableEntry {
+        return @ptrFromInt(self.address << 12);
+    }
+
     pub fn setAddress(self: *PageTableEntry, addr: usize) void {
         self.address = @truncate(addr >> 12);
     }
@@ -86,6 +90,32 @@ var RECURSIVE_INDEX: usize = 255;
 pub const PageTable align(4096) = struct {
     entries: [PAGE_TABLE_ENTRIES]PageTableEntry = [_]PageTableEntry{.{}} ** PAGE_TABLE_ENTRIES,
 
+    pub fn init(allocator: *std.mem.Allocator) !*PageTable {
+        _ = allocator;
+
+    }
+
+    /// Sets the currently active page table (writes cr3 register).
+    pub fn load(self: *PageTable) void {
+        const phys = switch (translateToPhysical(@intFromPtr(self))) {
+            .success => |addr| addr,
+            else => log.panic("Unable to translate virtual page table", .{}, @src()),
+        };
+
+        asm volatile ("mov %[phys_addr], %cr3"
+            :
+            : [phys_addr] "r" (phys),
+        );
+    }
+
+    /// Sets the currently active page table using a physical address (writes cr3 register).
+    pub fn loadPhysical(phys_addr: usize) void {
+        asm volatile ("mov %[phys_addr], %cr3"
+            :
+            : [phys_addr] "r" (phys_addr),
+        );
+    }
+
     /// Inserts the recusrive page entry at `RECUSRIVE_INDEX`. This should only be allowed for the top level page table.
     pub fn setRecursiveEntry() void {
         const page_table = getPageTable();
@@ -93,6 +123,25 @@ pub const PageTable align(4096) = struct {
 
         if (!recursive_entry.flags.present) {
             recursive_entry.setAddress(@intFromPtr(page_table));
+            recursive_entry.flags = .{
+                .present = true,
+                .writable = true,
+            };
+        } else {
+            log.panic("Unable to set entry 511", .{}, @src());
+        }
+    }
+
+    /// Inserts the recusrive page entry at `RECUSRIVE_INDEX`. This should only be allowed for the top level page table.
+    pub fn setRecursiveEntryOn(self: *PageTable) void {
+        const recursive_entry = &self.entries[RECURSIVE_INDEX];
+        const phys_addr = switch (translateToPhysical(@intFromPtr(self))) {
+            .success => |addr| addr,
+            else => return,
+        };
+
+        if (!recursive_entry.flags.present) {
+            recursive_entry.setAddress(phys_addr);
             recursive_entry.flags = .{
                 .present = true,
                 .writable = true,
@@ -196,6 +245,95 @@ pub fn translateToPhysical(virtual: usize) PagingError {
     return .{ .success = l1_entry.getAddress() + offset };
 }
 
+pub fn mapPageInto(physical: usize, virtual: usize, flags: MappingFlags, into: *PageTable) PagingError {
+    _ = flags;
+    _ = physical;
+
+    const l1_index = (virtual >> 12) & 0x1FF;
+    _ = l1_index;
+    const l2_index = (virtual >> 21) & 0x1FF;
+    _ = l2_index;
+    const l3_index = (virtual >> 30) & 0x1FF;
+    _ = l3_index;
+    const l4_index = (virtual >> 39) & 0x1FF;
+
+    const l4_entry = &into.entries[l4_index];
+    _ = l4_entry;
+}
+
+const TEMP_PAGE: usize = 0x100000000000;
+
+pub fn allocTable() !*PageTable {
+    const addr = alloc.physical_page_allocator.rawAlloc(@sizeOf(PageTable), 12, @returnAddress()) orelse return std.mem.Allocator.Error.OutOfMemory;
+
+    return @ptrCast(@alignCast(&addr[0]));
+}
+
+fn tmpPage() *PageTable {
+    return @ptrFromInt(TEMP_PAGE);
+}
+
+fn mapTmpPage(physical: usize) PagingError {
+    // _ = unmapPage2MB(TEMP_PAGE);
+
+    const l1_index = (TEMP_PAGE >> 12) & 0x1FF;
+    const l2_index = (TEMP_PAGE >> 21) & 0x1FF;
+    const l3_index = (TEMP_PAGE >> 30) & 0x1FF;
+    const l4_index = (TEMP_PAGE >> 39) & 0x1FF;
+
+    const l4_entry = PageTable.level4Entry(l4_index);
+    if (l4_entry.flags.size != .small) return .{ .mapping = .L4 };
+    if (!l4_entry.flags.present) {
+        const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
+
+        l4_entry.setAddress(@intFromPtr(new_addr));
+        l4_entry.flags.present = true;
+
+        const l3_entry = PageTable.level3Entry(l4_index, l3_index);
+        l3_entry.* = .{};
+
+        regs.flush_tlb();
+    }
+
+    const l3_entry = PageTable.level3Entry(l4_index, l3_index);
+    if (!l3_entry.flags.present) {
+        const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
+
+        l3_entry.setAddress(@intFromPtr(new_addr));
+        l3_entry.flags.present = true;
+
+        const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
+        l2_entry.* = .{};
+
+        regs.flush_tlb();
+    } else if (l3_entry.flags.size != .small) {
+        return .{ .not_small = .L3 };
+    }
+
+    const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
+    if (!l2_entry.flags.present) {
+        const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
+
+        l2_entry.setAddress(@intFromPtr(new_addr));
+        l2_entry.flags.present = true;
+
+        const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
+        l1_entry.* = .{};
+
+        regs.flush_tlb();
+    } else if (l2_entry.flags.size != .small) {
+        return .{ .mapping = .L2 };
+    }
+
+    const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
+    // log.info("Mapped to {x}", .{physical}, @src());
+
+    l1_entry.setAddress(physical);
+    l1_entry.flags = .{ .writable = true, .present = true };
+
+    return .{ .success = physical };
+}
+
 /// Maps one page from `virtual` address to `physical` address. `flags` are written to the page table entry.
 /// Page levels are resolved recursivley via `RECURSIVE_INDEX` on the 4th level page table
 pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError {
@@ -204,43 +342,72 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
     const l3_index = (virtual >> 30) & 0x1FF;
     const l4_index = (virtual >> 39) & 0x1FF;
 
+    // log.info("Herep {} {} {} {}", .{ l4_index, l3_index, l2_index, l1_index }, @src());
     const l4_entry = PageTable.level4Entry(l4_index);
     if (l4_entry.flags.size != .small) return .{ .mapping = .L4 };
     if (!l4_entry.flags.present) {
-        const new_addr = alloc.page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L4 };
-        new_addr.* = .{};
+        // const new_addr = alloc.page_allocator.alignedAlloc(PageTable, 4096, 1) catch return .{ .allocate_page_table = .L4 };
+        const new_addr = allocTable() catch return .{ .allocate_page_table = .L3 };
+
+        log.info("Poo", .{}, @src());
+        // We can't go new_addr.* = .{} because the entry may not be mapped
+        _ = mapTmpPage(@intFromPtr(new_addr));
+        tmpPage().* = .{};
+
         l4_entry.setAddress(@intFromPtr(new_addr));
         l4_entry.flags.present = true;
+
+        regs.flush_tlb();
     }
 
     const l3_entry = PageTable.level3Entry(l4_index, l3_index);
     if (!l3_entry.flags.present) {
-        const new_addr = alloc.page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L3 };
-        new_addr.* = .{};
+        // const new_addr = alloc.page_allocator.alignedAlloc(PageTable, 4096, 1) catch return .{ .allocate_page_table = .L3 };
+        const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
+
+        // We can't go new_addr.* = .{} because the entry may not be mapped
+        _ = mapTmpPage(@intFromPtr(new_addr));
+        tmpPage().* = .{ .entries = [1]PageTableEntry{PageTableEntry{ .os_high = 45 }} ** PAGE_TABLE_ENTRIES };
+
+        // log.info("Alloc {x}", .{@intFromPtr(new_addr)}, @src());
 
         l3_entry.setAddress(@intFromPtr(new_addr));
         l3_entry.flags.present = true;
+
+        regs.flush_tlb();
     } else if (l3_entry.flags.size != .small) {
         return .{ .not_small = .L3 };
     }
 
+    // log.info("Index {} {} {} {}", .{l4_index, l3_index, l2_index, l1_index}, @src());
     const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
     if (!l2_entry.flags.present) {
-        const new_addr = alloc.page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L2 };
-        new_addr.* = .{};
+        const new_addr = allocTable() catch return .{ .allocate_page_table = .L1 };
+
+        // log.info("Poo Alloc {}", .{translateToPhysical(@intFromPtr(l2_entry))}, @src());
+        // log.info("Poo {}", .{l2_entry}, @src());
+
+        // We can't go new_addr.* = .{} because the entry may not be mapped
+        _ = mapTmpPage(@intFromPtr(new_addr));
+        tmpPage().* = .{ .entries = [1]PageTableEntry{PageTableEntry{ .os_high = 69 }} ** PAGE_TABLE_ENTRIES };
 
         l2_entry.setAddress(@intFromPtr(new_addr));
         l2_entry.flags.present = true;
+
+        regs.flush_tlb();
     } else if (l2_entry.flags.size != .small) {
         return .{ .mapping = .L2 };
     }
 
     const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
+    // log.info("Entry {}", .{l1_entry}, @src());
     if (l1_entry.flags.present) return .{ .already_mapped = .L1 };
 
     l1_entry.setAddress(physical);
     l1_entry.flags = flags;
     l1_entry.flags.present = true;
+
+    regs.flush_tlb();
 
     return .{ .success = physical };
 }
@@ -248,13 +415,14 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
 /// Maps one 2MB huge page from `virtual` address to `physical` address. `flags` are written to the page table entry.
 /// Page levels are resolved recursivley via `RECURSIVE_INDEX` on the 4th level page table
 pub fn mapPage2MB(physical: usize, virtual: usize, flags: MappingFlags) PagingError {
+    log.panic("TODO: change pt allocations (see mapPage)", .{}, @src());
     const l2_index = (virtual >> 21) & 0x1FF;
     const l3_index = (virtual >> 30) & 0x1FF;
     const l4_index = (virtual >> 39) & 0x1FF;
 
     const l4_entry = PageTable.level4Entry(l4_index);
     if (!l4_entry.flags.present) {
-        const new_addr = alloc.page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L4 };
+        const new_addr = alloc.physical_page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L4 };
         new_addr.* = .{};
 
         l4_entry.setAddress(@intFromPtr(new_addr));
@@ -265,14 +433,14 @@ pub fn mapPage2MB(physical: usize, virtual: usize, flags: MappingFlags) PagingEr
 
     const l3_entry = PageTable.level3Entry(l4_index, l3_index);
     if (!l3_entry.flags.present) {
-        const new_addr = alloc.page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L3 };
+        const new_addr = alloc.physical_page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L3 };
         new_addr.* = .{};
 
         l3_entry.setAddress(@intFromPtr(new_addr));
         l3_entry.flags = .{
             .present = true,
         };
-    } else if (l4_entry.flags.size != .small) {
+    } else if (l3_entry.flags.size != .small) {
         return .{ .not_small = .L3 };
     }
 
@@ -287,15 +455,45 @@ pub fn mapPage2MB(physical: usize, virtual: usize, flags: MappingFlags) PagingEr
     return .{ .success = physical };
 }
 
-/// Maps one 1GB huge page from `virtual` address to `physical` address. `flags` are written to the page table entry.
-/// Page levels are resolved recursivley via `RECURSIVE_INDEX` on the 4th level page table
-pub fn mapPage1GB(physical: usize, virtual: usize, flags: MappingFlags) PagingError {
+/// Unmap the 2MB huge page at the given virtual address
+pub fn unmapPage2MB(virtual: usize) PagingError {
+    const l2_index = (virtual >> 21) & 0x1FF;
     const l3_index = (virtual >> 30) & 0x1FF;
     const l4_index = (virtual >> 39) & 0x1FF;
 
     const l4_entry = PageTable.level4Entry(l4_index);
     if (!l4_entry.flags.present) {
-        const new_addr = alloc.page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L4 };
+        return .{ .not_present = .L4 };
+    } else if (l4_entry.flags.size != .small) {
+        return .{ .not_small = .L4 };
+    }
+
+    const l3_entry = PageTable.level3Entry(l4_index, l3_index);
+    if (!l3_entry.flags.present) {
+        return .{ .not_present = .L3 };
+    } else if (l3_entry.flags.size != .small) {
+        return .{ .not_small = .L3 };
+    }
+
+    const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
+    if (!l2_entry.flags.present) return .{ .not_present = .L2 };
+
+    const address = l2_entry.getAddress2MB();
+    l2_entry.* = .{};
+
+    return .{ .success = address };
+}
+
+/// Maps one 1GB huge page from `virtual` address to `physical` address. `flags` are written to the page table entry.
+/// Page levels are resolved recursivley via `RECURSIVE_INDEX` on the 4th level page table
+pub fn mapPage1GB(physical: usize, virtual: usize, flags: MappingFlags) PagingError {
+    log.panic("TODO: change pt allocations (see mapPage)", .{}, @src());
+    const l3_index = (virtual >> 30) & 0x1FF;
+    const l4_index = (virtual >> 39) & 0x1FF;
+
+    const l4_entry = PageTable.level4Entry(l4_index);
+    if (!l4_entry.flags.present) {
+        const new_addr = alloc.physical_page_allocator.create(PageTable) catch return .{ .allocate_page_table = .L4 };
         new_addr.* = .{};
 
         l4_entry.setAddress(@intFromPtr(new_addr));
@@ -317,7 +515,7 @@ pub fn mapPage1GB(physical: usize, virtual: usize, flags: MappingFlags) PagingEr
 
 /// Maps `count` pages using the given `physical` and `virtual` address.
 /// PagingError.success is returned on success
-pub fn mapPages(physical: usize, virtual: usize, count: usize, flags: MappingFlags) PagingError {
+pub fn mapPages(physical: usize, virtual: usize, count: usize, flags: MappingFlags) error{PagingError}!usize {
     var i: usize = 0;
     while (i < count) {
         switch (mapPage(physical + i * 4096, virtual + i * 4096, flags)) {
@@ -327,12 +525,12 @@ pub fn mapPages(physical: usize, virtual: usize, count: usize, flags: MappingFla
 
                 regs.flush_tlb();
             },
-            else => |err| return err,
+            else => |err| log.panic("Error mapping pages: {}", .{err}, @src()),
         }
         i += 1;
     }
 
-    return .{ .success = physical };
+    return physical;
 }
 
 /// Maps `count` 2MB huge pages using the given `physical` and `virtual` address.
@@ -373,6 +571,21 @@ pub fn addKernelHeader(header: std.elf.Elf64_Phdr) !void {
     try KERNEL_HEADERS.append(header);
 }
 
+/// `from` is the physical address to the map
+/// `into` is the virtual address of the new map
+pub fn remapKernel(from: *PageTable, into: *PageTable) void {
+    const l4_code_index = (config.KERNEL_CODE_VIRTUAL_START >> 39) & 0x1FF;
+
+    const l4_stack_start_index = ((config.KERNEL_STACK_VIRTUAL_START - config.KERNEL_STACK_LENGTH) >> 39) & 0x1FF;
+
+    _ = mapTmpPage(@intFromPtr(from));
+
+    into.entries[l4_code_index] = tmpPage().entries[l4_code_index];
+    into.entries[l4_stack_start_index] = tmpPage().entries[l4_stack_start_index];
+
+    alloc.remapKernelHeap(tmpPage(), into);
+}
+
 pub fn mapKernel() void {
     for (KERNEL_HEADERS.constSlice()) |header| {
         const exe = header.p_flags & std.elf.PF_X > 0;
@@ -383,7 +596,7 @@ pub fn mapKernel() void {
 
         // .bss section doesn't have file contents, so instead we allocate the amount of memory it requires
         if (header.p_filesz != header.p_memsz) {
-            const value = alloc.page_allocator.alloc(u8, header.p_memsz) catch {
+            const value = alloc.physical_page_allocator.alloc(u8, header.p_memsz) catch {
                 log.panic("No memory left!", .{}, @src());
             };
 
@@ -391,20 +604,17 @@ pub fn mapKernel() void {
             physical = @ptrCast(value);
         }
 
-        switch (mapPages(@intFromPtr(physical), header.p_vaddr, header.p_memsz / 4097 + 1, .{ .writable = flag_write })) {
-            .success => |_| {
-                log.info("Mapped kernel page {x} {x} - {} {}", .{ header.p_offset, header.p_vaddr, header.p_memsz, flag_write }, @src());
-            },
-            else => |err| {
-                log.panic("Error mapping kernel: {}", .{err}, @src());
-            },
-        }
+        _ = mapPages(@intFromPtr(physical), header.p_vaddr, header.p_memsz / 4096 + 1, .{ .writable = flag_write }) catch |err| {
+            log.panic("Error mapping kernel: {}", .{err}, @src());
+        };
+
+        log.info("Mapped kernel page {x} {x} - {} {}", .{ header.p_offset, header.p_vaddr, header.p_memsz, flag_write }, @src());
     }
 
     const kernel_page_count: usize = config.KERNEL_STACK_LENGTH / 4096;
 
     for (0..kernel_page_count) |page| {
-        const addr = alloc.page_allocator.alloc(u8, 4096) catch {
+        const addr = alloc.physical_page_allocator.alloc(u8, 4096) catch {
             log.panic("Unable to allocate kernel stack", .{}, @src());
         };
 

@@ -1,7 +1,5 @@
 const std = @import("std");
-const bc = @import("../build_common.zig");
 const RamDisk = @import("../RamDisk.zig");
-// const RamDisk = @import("../build.zig").MyBuildStep;
 
 const drivers = [_][]const u8{
     "block/ich9-ahci",
@@ -17,8 +15,18 @@ pub fn build(b: *std.Build, rd: *RamDisk) void {
         .abi = .none,
     };
 
+    const kernel_module = b.createModule(.{
+        .source_file = .{ .path = thisDir() ++ "/../src/lib.zig" },
+    });
+
+    const depend = std.build.ModuleDependency{
+        .name = "kernel",
+        .module = kernel_module,
+    };
+
     const driver_module = b.createModule(.{
         .source_file = .{ .path = thisDir() ++ "/src/lib.zig" },
+        .dependencies = &.{depend},
     });
 
     {
@@ -32,9 +40,6 @@ pub fn build(b: *std.Build, rd: *RamDisk) void {
         const driver_path = b.pathJoin(&.{ b.install_path, "driver_config" });
         const driver_config = b.addWriteFile(driver_path, buffer.items);
 
-        // const install_driver = b.addInstallFile(.{ .path = driver_path }, "driver_config");
-        // install_driver.step.dependOn(&driver_config.step);
-
         rd.step.dependOn(&driver_config.step);
     }
 
@@ -47,10 +52,17 @@ pub fn build(b: *std.Build, rd: *RamDisk) void {
             .target = driver_target,
             .optimize = .Debug,
         });
-        driver_lib.entry_symbol_name = "main";
+        driver_lib.pie = false;
+        driver_lib.force_pic = false;
+
+        driver_lib.code_model = .large;
+        driver_lib.entry_symbol_name = "driver_main_stub";
         driver_lib.linker_script = .{ .path = thisDir() ++ "/driver.ld" };
 
+        driver_lib.addObjectFile(.{ .path = "zig-out/kernel-symbols.o" });
+
         driver_lib.addModule("driver", driver_module);
+        driver_lib.addModule("kernel", kernel_module);
 
         const objcopy_step = driver_lib.addObjCopy(.{ .basename = driver_lib.name });
         const install_driver = b.addInstallLibFile(objcopy_step.getOutput(), b.fmt("drivers/{s}", .{driver_lib.name}));

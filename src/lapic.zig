@@ -1,3 +1,4 @@
+const regs = @import("./registers.zig");
 const log = @import("./logger.zig");
 
 var CPU_APIC: Apic = undefined;
@@ -48,9 +49,16 @@ const Apic = struct {
 pub const DEFAULT_BASE: usize = 0xFEE00000;
 
 /// Initialize the cpu's apic. `apic_base` should be a physical address to the base register of the apic
-pub fn init(control_base: usize) *Apic {
+pub fn init(control_base: usize, virtual: usize) *Apic {
+    if (control_base & @as(usize, 0xFFF) > 0) {
+        log.warn("Attempted to set APIC base to non page aligned address 0x{x}", .{control_base}, @src());
+    }
+
     log.info("Local APIC initialize at base 0x{x:0>8}", .{control_base}, @src());
-    CPU_APIC = .{ .control_base = control_base };
+
+    regs.setMSR(0x1B, (control_base & 0xFFFFFF0000) | 0x800); // IA32_APIC_BASE_MSR
+    CPU_APIC = .{ .control_base = virtual };
+
     return &CPU_APIC;
 }
 

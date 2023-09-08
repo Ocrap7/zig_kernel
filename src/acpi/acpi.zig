@@ -1,4 +1,20 @@
 const log = @import("../logger.zig").getLogger();
+const alloc = @import("../allocator.zig");
+const paging = @import("../paging.zig");
+
+/// Setup acpi memory maps
+pub fn init() !void {
+    const map = alloc.getMemoryMap();
+
+    for (map) |desc| {
+        switch (desc.type) {
+            .ACPIReclaimMemory => {
+                _ = try paging.mapPages(desc.physical_start, desc.physical_start, desc.number_of_pages, .{ .writable = true });
+            },
+            else => {},
+        }
+    }
+}
 
 /// Common header that all ACPI tables contain
 pub const DescriptionHeader = packed struct {

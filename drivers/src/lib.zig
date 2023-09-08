@@ -1,10 +1,14 @@
 const std = @import("std");
+const root = @import("root");
+const kernel = @import("kernel");
 const testing = std.testing;
 
-pub export fn add(a: i32, b: i32) i32 {
-    return a + b;
+extern fn main() void;
+
+comptime {
+    _ = root;
 }
 
-test "basic add functionality" {
-    try testing.expect(add(3, 7) == 10);
+export fn driver_main_stub() void {
+    main();
 }

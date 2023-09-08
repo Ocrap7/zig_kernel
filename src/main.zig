@@ -8,8 +8,14 @@ const alloc = @import("./allocator.zig");
 const acpi = @import("./acpi/acpi.zig");
 const config = @import("./config.zig");
 const kernel = @import("./kernel.zig");
+// pub const lib = @import("./lib.zig");
+
+// comptime {
+//     _ = lib;
+// }
 
 pub export const _fltused: i32 = 0;
+
 
 pub fn main() uefi.Status {
     log.init();

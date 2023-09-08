@@ -1,7 +1,10 @@
+const alloc = @import("./allocator.zig");
+const paging = @import("./paging.zig");
 const acpi = @import("./acpi/acpi.zig");
 const ioapic = @import("./ioapic.zig");
 const irq = @import("./irq.zig");
 const std = @import("std");
+const log = @import("./logger.zig");
 
 const MAX_VECTORS: usize = 64;
 const VECTOR_OFFSET: u8 = 0x30;
@@ -63,7 +66,13 @@ pub const EventManager = struct {
                 .io_apic => |value| {
                     found_ioapic = true;
 
-                    var io = ioapic.get(@as(usize, value.io_apic_address));
+                    const virtualPage = alloc.allocVirtualPage();
+                    switch (paging.mapPage(@as(usize, value.io_apic_address), @intFromPtr(virtualPage), .{ .writable = true })) {
+                        .success => {},
+                        else => |err| log.panic("Unable to map ioapic region {}", .{err}, @src()),
+                    }
+
+                    var io = ioapic.get(@intFromPtr(virtualPage));
                     const info = io.info();
 
                     if (irq_pin < value.gsi_base or irq_pin >= value.gsi_base + info.max_entries) {
