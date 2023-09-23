@@ -9,9 +9,11 @@ pub const base_id: Step.Id = .custom;
 step: Step,
 basename: []const u8,
 output_file: std.Build.GeneratedFile,
+program: []const u8,
 
 pub const Options = struct {
     basename: ?[]const u8 = null,
+    program: []const u8 = "objcopy",
 };
 
 pub fn create(
@@ -28,6 +30,7 @@ pub fn create(
         }),
         .basename = options.basename orelse "code-strip",
         .output_file = std.Build.GeneratedFile{ .step = &self.step },
+        .program = options.program,
     };
     return self;
 }
@@ -92,7 +95,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
 
     _ = try step.evalZigProcess(&.{
         // b.zig_exe, "ld.lld",
-        "objcopy",
+        self.program,
         // "-r",
         // b.fmt("--just-symbols={s}", .{file.?}),
         // "-o", full_dest_path,

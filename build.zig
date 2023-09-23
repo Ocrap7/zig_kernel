@@ -28,9 +28,9 @@ pub fn build(b: *std.build.Builder) void {
     exe.pie = false;
     exe.force_pic = false;
     exe.code_model = .medium;
-    exe.step.dependOn(&install_ramdisk_step.step);
+    // exe.step.dependOn(&install_ramdisk_step.step);
 
-    exe.addAnonymousModule("ramdisk", .{ .source_file = ramdisk_step.getOutput() });
+    // exe.addAnonymousModule("ramdisk", .{ .source_file = ramdisk_step.getOutput() });
 
     {
         const objcopy_step = exe.addObjCopy(.{ .basename = "kernel" });
@@ -39,7 +39,7 @@ pub fn build(b: *std.build.Builder) void {
 
         b.default_step.dependOn(&install_kernel_step.step);
 
-        const code_strip_step = CodeStrip.create(b, .{});
+        const code_strip_step = CodeStrip.create(b, .{ .program = "llvm-objcopy" });
         code_strip_step.step.dependOn(&install_kernel_step.step);
 
         const install_symbols = b.addInstallBinFile(code_strip_step.getOutput(), "../kernel-symbols.o");
@@ -66,6 +66,8 @@ pub fn build(b: *std.build.Builder) void {
 
     var args = [_][]const u8{
         "-d",
+        "-f",
+        "zig-out/ramdisk",
         // "-q", "../repos/qemu/build/x86_64-softmmu/qemu-system-x86_64",
         "--",
 
@@ -100,6 +102,11 @@ pub fn build(b: *std.build.Builder) void {
         "tcp:127.0.0.1:55555,server,nowait",
         // "--nographic",
     };
+
+    {
+        const step = b.step("ramdisk", "Build ramdisk");
+        step.dependOn(&install_ramdisk_step.step);
+    }
 
     {
         const run_step = std.build.RunStep.create(b, "uefi-run bootx64");

@@ -4,9 +4,9 @@ const uefi = @import("std").os.uefi;
 const regs = @import("./registers.zig");
 const SerialLogger = @import("./devices/devices.zig").serial.Logger;
 
-/// UEFI logger for the `SimpleTextOutputProtocol`
+/// UEFI logger for the `SimpleTextOutput`
 pub const Logger = struct {
-    console: *uefi.protocols.SimpleTextOutputProtocol,
+    console: *uefi.protocol.SimpleTextOutput,
 
     pub const Writer = std.io.Writer(@This(), uefi.Status.EfiError, write);
 
@@ -55,10 +55,10 @@ pub fn info(comptime format: []const u8, args: anytype, src: std.builtin.SourceL
     } else if (uefi.system_table.con_out) |out| {
         const logger = Logger{ .console = out };
 
-        _ = out.setAttribute(uefi.protocols.SimpleTextOutputProtocol.green);
+        _ = out.setAttribute(uefi.protocol.SimpleTextOutput.green);
         logger.writer().print("{s}:{} INFO:", .{ src.file, src.line }) catch {};
 
-        _ = out.setAttribute(uefi.protocols.SimpleTextOutputProtocol.white);
+        _ = out.setAttribute(uefi.protocol.SimpleTextOutput.white);
         logger.writer().print(format, args) catch {};
         _ = out.outputString(&[_:0]u16{ '\r', '\n' });
 
@@ -78,10 +78,10 @@ pub fn warn(comptime format: []const u8, args: anytype, src: std.builtin.SourceL
     } else if (uefi.system_table.con_out) |out| {
         const logger = Logger{ .console = out };
 
-        _ = out.setAttribute(uefi.protocols.SimpleTextOutputProtocol.green);
+        _ = out.setAttribute(uefi.protocol.SimpleTextOutput.green);
         logger.writer().print("{s}:{}: ", .{ src.file, src.line }) catch {};
 
-        _ = out.setAttribute(uefi.protocols.SimpleTextOutputProtocol.white);
+        _ = out.setAttribute(uefi.protocol.SimpleTextOutput.white);
         logger.writer().print(format, args) catch {};
         _ = out.outputString(&[_:0]u16{ '\r', '\n' });
 
@@ -95,19 +95,19 @@ pub fn panic(comptime format: []const u8, args: anytype, src: std.builtin.Source
     if (KERNEL) {
         const logger = SerialLogger{};
 
-        logger.writer().print("\x1b[31;7m{s}:{}\x1b[0m \x1b[1;31mPANIC: \x1b[0m", .{src.file, src.line}) catch {};
+        logger.writer().print("\x1b[31;7m{s}:{}\x1b[0m \x1b[1;31mPANIC: \x1b[0m", .{ src.file, src.line }) catch {};
         logger.writer().print(format, args) catch {};
 
         logger.writer().print("\n", .{}) catch {};
     } else if (uefi.system_table.std_err) |err| {
-        _ = err.setAttribute(uefi.protocols.SimpleTextOutputProtocol.red);
+        _ = err.setAttribute(uefi.protocol.SimpleTextOutput.red);
 
         const logger = Logger{ .console = err };
         logger.writer().print(format, args) catch {};
         _ = err.outputString(&[_:0]u16{ '\r', '\n' });
 
         logger.writer().print("\nexplicit panic: ", .{}) catch {};
-        _ = err.setAttribute(uefi.protocols.SimpleTextOutputProtocol.white);
+        _ = err.setAttribute(uefi.protocol.SimpleTextOutput.white);
 
         logger.writer().print("{s}:{} @ {s}\n", .{ src.file, src.line, src.fn_name }) catch {};
     }

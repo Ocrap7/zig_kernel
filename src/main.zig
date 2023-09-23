@@ -7,18 +7,78 @@ const regs = @import("./registers.zig");
 const alloc = @import("./allocator.zig");
 const acpi = @import("./acpi/acpi.zig");
 const config = @import("./config.zig");
-const kernel = @import("./kernel.zig");
-// pub const lib = @import("./lib.zig");
-
-// comptime {
-//     _ = lib;
-// }
 
 pub export const _fltused: i32 = 0;
 
+pub fn toUtf16(comptime ascii: []const u8) [ascii.len:0]u16 {
+    const curr = [1:0]u16{ascii[0]};
+    if (ascii.len == 1) return curr;
+    return curr ++ toUtf16(ascii[1..]);
+}
+
+var file_protocol: *uefi.protocol.File = undefined;
+
+var RAMDISK: [1024 * 1024]u8 = undefined;
+
+pub fn readFile(comptime path: []const u8) []u8 {
+    const utf16_path = comptime toUtf16(path);
+
+    var file: *uefi.protocol.File = undefined;
+
+    if (file_protocol.open(
+        &file,
+        &utf16_path,
+        uefi.protocol.File.efi_file_mode_read,
+        uefi.protocol.File.efi_file_read_only,
+    ) != .Success) {
+        log.panic("Can't open file '{s}'", .{path}, @src());
+    }
+
+    log.info("Hello 1", .{}, @src());
+
+    var position = uefi.protocol.File.efi_file_position_end_of_file;
+    _ = file.setPosition(position);
+    _ = file.getPosition(&position);
+    _ = file.setPosition(0);
+    log.info("Hello 2", .{}, @src());
+
+    // var buffer: []u8 = alloc.physical_page_allocator.alloc(u8, position) catch unreachable;
+    if (file.read(&position, &RAMDISK) != .Success) {
+        log.panic("Can't read file '{s}'", .{path}, @src());
+    }
+    log.info("Hello 3", .{}, @src());
+
+    return RAMDISK[0..position];
+}
+
+/// See build.zig where this is added as a module
+const KERNEL_CODE = @embedFile("kernel");
+
+/// this is a workaround to align the code on a page boundry.
+/// TODO: once embedfile is able to align, use that directly
+/// as this creates two copies of the data in memory
+fn kernel_code() type {
+    return struct { code: [KERNEL_CODE.len:0]u8 align(4096) };
+}
+
+pub const KERNEL: kernel_code() = .{ .code = KERNEL_CODE.* };
 
 pub fn main() uefi.Status {
     log.init();
+
+    var filesystem_protocol_opt: ?*uefi.protocol.SimpleFileSystem = undefined;
+    if (uefi.system_table.boot_services.?.locateProtocol(&uefi.protocol.SimpleFileSystem.guid, null, @ptrCast(&filesystem_protocol_opt)) != .Success) {
+        return .Aborted;
+    }
+
+    const filesystem_protocol = filesystem_protocol_opt.?;
+
+    if (filesystem_protocol.openVolume(&file_protocol) != .Success) {
+        return .Aborted;
+    }
+
+    const ramdisk = readFile("ramdisk");
+    log.info("Hello 4", .{}, @src());
 
     switch (alloc.initMemoryMap()) {
         .Success => {},
@@ -51,7 +111,7 @@ pub fn main() uefi.Status {
 
     if (rsdp == null) log.panic("RSDP not found", .{}, @src());
 
-    var fbs = std.io.FixedBufferStream([]const u8){ .buffer = &config.KERNEL.code, .pos = 0 };
+    var fbs = std.io.FixedBufferStream([]const u8){ .buffer = &KERNEL.code, .pos = 0 };
 
     const headers = std.elf.Header.read(&fbs) catch {
         log.panic("Unable to read kernel elf file", .{}, @src());
@@ -72,7 +132,7 @@ pub fn main() uefi.Status {
         }
     }
 
-    paging.mapKernel();
+    paging.mapKernel(&KERNEL.code);
     log.info("Mapped kernel", .{}, @src());
 
     const kernel_params = config.KernelParams{
@@ -81,6 +141,7 @@ pub fn main() uefi.Status {
 
         .memory_map = alloc.getMemoryMap(),
         .allocated = alloc.getMappedPages(),
+        .ramdisk = ramdisk,
     };
 
     // Jumping to kernel entry with parameters

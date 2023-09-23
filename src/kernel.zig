@@ -25,18 +25,7 @@ pub const os = @import("./os.zig");
 const apic = @import("./lapic.zig");
 const ioapic = @import("./ioapic.zig");
 
-const RAMDISK_CONTENT_RAW = @embedFile("ramdisk");
-
 pub export const _kernel_export_lib: usize = 0;
-
-/// this is a workaround to align the code on a page boundry.
-/// TODO: once embedfile is able to align, use that directly
-/// as this creates two copies of the data in memory
-fn ramdisk_content() type {
-    return struct { code: [RAMDISK_CONTENT_RAW.len:0]u8 align(@alignOf(ramdisk.RamDisk)) };
-}
-
-const RAMDISK: ramdisk_content() = .{ .code = RAMDISK_CONTENT_RAW.* };
 
 export fn kernel_start(params: *const config.KernelParams) callconv(.C) noreturn {
     kernel_main(params) catch log.panic("Kernel Panic", .{}, @src());
@@ -44,7 +33,17 @@ export fn kernel_start(params: *const config.KernelParams) callconv(.C) noreturn
     while (true) {}
 }
 
+var RAMDISK: [1024 * 1024]u8 align(8) = undefined;
+var RAMDISK_LEN: usize = undefined;
+
+fn ramdisk_code() []align (8) const u8 {
+    return RAMDISK[0..RAMDISK_LEN];
+}
+
 fn kernel_main(params: *const config.KernelParams) !noreturn {
+    @memcpy(RAMDISK[0..params.ramdisk.len], params.ramdisk);
+    RAMDISK_LEN = params.ramdisk.len;
+
     gdt.init_gdt();
     irq.init_idt();
 
@@ -54,13 +53,10 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
     alloc.copyMemoryMap(params.memory_map, params.allocated); // We copy the memory map so that we can eventually (safely) unmap the bootloader pages
     alloc.printMemoryMap();
 
+    log.info("Starting kernel...", .{}, @src());
+
     const stats = alloc.MemoryStats.collect();
     stats.print();
-
-    const pt = paging.getPageTable();
-
-    log.info("kernel", .{}, @src());
-    _ = pt;
 
     const cpu_features = regs.CpuFeatures.get();
 
@@ -131,7 +127,7 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
 
     schedular.init();
 
-    const rd = ramdisk.RamDisk.fromBuffer(&RAMDISK.code);
+    const rd = ramdisk.RamDisk.fromBuffer(ramdisk_code());
     const driver_config = rd.searchFile("driver_config");
 
     if (driver_config) |dconfig| {

@@ -586,13 +586,13 @@ pub fn remapKernel(from: *PageTable, into: *PageTable) void {
     alloc.remapKernelHeap(tmpPage(), into);
 }
 
-pub fn mapKernel() void {
+pub fn mapKernel(code: []const u8) void {
     for (KERNEL_HEADERS.constSlice()) |header| {
         const exe = header.p_flags & std.elf.PF_X > 0;
         _ = exe;
         const flag_write = header.p_flags & std.elf.PF_W > 0;
 
-        var physical = &config.KERNEL.code[header.p_offset];
+        var physical = &code[header.p_offset];
 
         // .bss section doesn't have file contents, so instead we allocate the amount of memory it requires
         if (header.p_filesz != header.p_memsz) {

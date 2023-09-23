@@ -8,7 +8,7 @@ pub var schedular: Schedular = undefined;
 const List = std.SinglyLinkedList(tasks.Task);
 
 pub const Schedular = struct {
-    allocator: std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false }),
+    allocator: std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false, .stack_trace_frames = 0 }),
     /// The schedular owns the tasks
     processes: List,
     current_process: ?*List.Node,
@@ -43,8 +43,7 @@ pub const Schedular = struct {
 
 pub fn init() void {
     log.warn("Scheldul", .{}, @src());
-    var allocator = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false }){};
 
-    schedular = .{ .allocator = allocator, .processes = .{}, .current_process = null };
+    schedular = .{ .allocator = .{}, .processes = .{}, .current_process = null };
     log.warn("Scheldul fjldkfj", .{}, @src());
 }

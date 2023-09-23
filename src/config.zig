@@ -20,16 +20,5 @@ pub const KernelParams = struct {
 
     memory_map: []alloc.MemoryDescriptor,
     allocated: alloc.MappedPages,
+    ramdisk: []const u8,
 };
-
-/// See build.zig where this is added as a module
-const KERNEL_CODE = @embedFile("kernel");
-
-/// this is a workaround to align the code on a page boundry.
-/// TODO: once embedfile is able to align, use that directly
-/// as this creates two copies of the data in memory
-fn kernel_code() type {
-    return struct { code: [KERNEL_CODE.len:0]u8 align(4096) };
-}
-
-pub const KERNEL: kernel_code() = .{ .code = KERNEL_CODE.* };
