@@ -10,7 +10,7 @@ const l4_index = (virtual >> 39n) & 0x1FFn;
 console.log(l4_index, l3_index, l2_index, l1_index)
 // console.log((virtual >> 1).toString(2),`${Number(l4_index).toString(16)}-${Number(l3_index).toString(16)}-${Number(l2_index).toString(16)}-${Number(l1_index).toString(16)}-${Number(offset).toString(16)}`);
 
-// const errorCodes = [8, 10, 11, 12, 13, 14, 17, 30]
+const errorCodes = [8, 10, 11, 12, 13, 14, 17, 30]
 
 // for (let i = 0; i < 256; i+= 1) {
 //   if (errorCodes.includes(i)) {
@@ -20,10 +20,10 @@ console.log(l4_index, l3_index, l2_index, l1_index)
 //   }
 // }
 
-// for (let i = 0; i < 256; i+= 1) {
-//   if (errorCodes.includes(i)) {
-//     console.log(`fn isr${i}() callconv(.Naked) void { isr_stub_err(${i}); }`)
-//   } else {
-//     console.log(`fn isr${i}() callconv(.Naked) void { isr_stub(${i}); }`)
-//   }
-// }
+for (let i = 0; i < 256; i += 1) {
+    if (errorCodes.includes(i)) {
+        console.log(`fn isr${i}() callconv(.Naked) void { asm volatile ("cli; pushq %[vector]; jmp isr_stub_next" : : [vector] "n" (${i})); }`)
+    } else {
+        console.log(`fn isr${i}() callconv(.Naked) void { asm volatile ("cli; pushq $0; pushq %[vector]; jmp isr_stub_next" : : [vector] "n" (${i})); }`)
+    }
+}

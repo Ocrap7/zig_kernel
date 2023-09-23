@@ -3,6 +3,7 @@ const RamDisk = @import("../RamDisk.zig");
 
 const drivers = [_][]const u8{
     "block/ich9-ahci",
+    "block/ps2",
 };
 
 // Although this function looks imperative, note that its job is to

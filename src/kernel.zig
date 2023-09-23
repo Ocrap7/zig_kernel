@@ -36,12 +36,12 @@ export fn kernel_start(params: *const config.KernelParams) callconv(.C) noreturn
 var RAMDISK: [1024 * 1024]u8 align(8) = undefined;
 var RAMDISK_LEN: usize = undefined;
 
-fn ramdisk_code() []align (8) const u8 {
+fn ramdisk_code() []align(8) const u8 {
     return RAMDISK[0..RAMDISK_LEN];
 }
 
 fn kernel_main(params: *const config.KernelParams) !noreturn {
-    @memcpy(RAMDISK[0..params.ramdisk.len], params.ramdisk);
+   @memcpy(RAMDISK[0..params.ramdisk.len], params.ramdisk);
     RAMDISK_LEN = params.ramdisk.len;
 
     gdt.init_gdt();
@@ -89,7 +89,10 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
     try acpi.init();
 
     const madt = madt_opt.?;
-    var ev_mgr = events.EventManager{ .madt = madt };
+    // var ev_mgr = events.EventManager{ .madt = madt };
+    events.init(madt);
+    var ev_mgr = events.instance();
+    _ = ev_mgr;
 
     {
         var offset: usize = 0;
@@ -105,6 +108,9 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
                             .success => |addrr| addrr,
                             else => log.panic("Unable to translate physical address", .{}, @src()),
                         };
+
+                        _ = paging.unmapPage(@intFromPtr(addr.ptr));
+                        _ = paging.mapPage(apic.DEFAULT_BASE, @intFromPtr(addr.ptr), .{ .writable = true });
 
                         log.info("APIC: 0x{x} -> 0x{x}", .{ @intFromPtr(addr.ptr), physical }, @src());
 
@@ -123,7 +129,8 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
         }
     }
 
-    _ = ev_mgr.register_listener(1, handlerpoo) catch log.panic("Unable to register listener", .{}, @src());
+    // _ = ev_mgr.register_listener(1, handlerpoo) catch log.panic("Unable to register listener", .{}, @src());
+    // while (true) {}
 
     schedular.init();
 
@@ -161,9 +168,9 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
         log.warn("Driver Config file not found in ramdisk", .{}, @src());
     }
 
-    schedular.schedular.resetCurrent();
-
     regs.sti();
+
+    schedular.schedular.resetCurrent();
 
     while (true) {}
 }

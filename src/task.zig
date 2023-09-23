@@ -56,6 +56,7 @@ pub const Task = struct {
         address_space.setRecursiveEntryOn();
         paging.remapKernel(paging.getPageTable(), address_space);
         paging.PageTable.loadPhysical(physAddr);
+        paging.mapKernelExtra();
 
         const headers = try std.elf.Header.read(&code_buffer);
         var iter = headers.program_header_iterator(&code_buffer);
@@ -74,7 +75,6 @@ pub const Task = struct {
                         .success => |addr| addr,
                         else => return error.TranslationError,
                     };
-                    log.info("Map {x} {x}", .{ header.p_vaddr, @intFromPtr(memory.ptr) }, @src());
 
                     _ = try paging.mapPages(phys, @as(u64, header.p_vaddr), header.p_memsz / 4097 + 1, .{ .writable = true });
 

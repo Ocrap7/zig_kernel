@@ -9,10 +9,20 @@ const log = @import("./logger.zig");
 const MAX_VECTORS: usize = 64;
 const VECTOR_OFFSET: u8 = 0x30;
 
-const EventError = error{
+pub const EventError = error{
     NoIOApic,
     InvalidIrq,
 };
+
+var EVENT_MANAGER: EventManager = undefined;
+
+pub fn init(madt: *const acpi.MADT) void {
+    EVENT_MANAGER = .{ .madt = madt };
+}
+
+pub fn instance() *EventManager {
+    return &EVENT_MANAGER;
+}
 
 /// Handles events with irqs
 pub const EventManager = struct {
@@ -55,6 +65,8 @@ pub const EventManager = struct {
     /// Register callaback `listener` on the specified irq pin.
     /// An idt vector is allocated and returned from the function.
     /// This vector is then set in the ioapic that contains the irq and enabled
+    /// 
+    /// The vector is returned on success
     pub fn register_listener(self: *EventManager, irq_pin: u16, listener: irq.IRQHandler) EventError!u8 {
         var offset: usize = 0;
         var found_ioapic = false;

@@ -1,17 +1,28 @@
-const log = @import("../logger.zig").getLogger();
+const log = @import("../logger.zig");
 const alloc = @import("../allocator.zig");
 const paging = @import("../paging.zig");
 
 /// Setup acpi memory maps
 pub fn init() !void {
+    try map_memory();
+}
+
+/// Setup acpi memory maps
+pub fn map_memory() !void {
     const map = alloc.getMemoryMap();
 
     for (map) |desc| {
         switch (desc.type) {
             .ACPIReclaimMemory => {
-                _ = try paging.mapPages(desc.physical_start, desc.physical_start, desc.number_of_pages, .{ .writable = true });
+                _ = paging.mapPages(desc.physical_start, desc.physical_start, desc.number_of_pages, .{ .writable = true }) catch {
+                    log.warn("Unable to map acpi memory {x}-{x}", .{ desc.physical_start, desc.physical_start + desc.number_of_pages * 4096 }, @src());
+
+                    continue;
+                };
             },
-            else => {},
+            else => {
+                continue;
+            },
         }
     }
 }
@@ -124,10 +135,6 @@ pub const MADT = packed struct {
                 .local_apic_nmi => |_| 6,
                 .count => |n| n,
             };
-
-            // const i = @intFromEnum(self.*);
-            // log.*.?.writer().print("len: {}\n", .{i}) catch {};
-            // return @truncate(i & 0xFF);
         }
     };
 

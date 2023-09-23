@@ -17,14 +17,14 @@ pub const CR0 = packed struct {
     paging: bool,
     rest: u33,
 
-    pub fn get() CR0 {
+    pub inline fn get() CR0 {
         const address = asm volatile ("mov %cr0, %rax"
             : [ret] "={rax}" (-> u64),
         );
         return @bitCast(address);
     }
 
-    pub fn set(cr0: CR0) void {
+    pub inline fn set(cr0: CR0) void {
         const ival: u64 = @bitCast(cr0);
         asm volatile ("mov %rax, %cr0"
             :
@@ -36,7 +36,7 @@ pub const CR0 = packed struct {
 pub const CR2 = packed struct {
     value: u64,
 
-    pub fn get() CR2 {
+    pub inline fn get() CR2 {
         const address = asm volatile ("mov %cr2, %rax"
             : [ret] "={rax}" (-> u64),
         );
@@ -58,7 +58,7 @@ pub const CR3 = packed struct {
     },
     phys_addr: u52,
 
-    pub fn get() CR3 {
+    pub inline fn get() CR3 {
         const address = asm volatile ("mov %cr3, %rax"
             : [ret] "={rax}" (-> u64),
         );
@@ -106,14 +106,14 @@ pub const CR4 = packed struct {
     protection_keys_super: bool,
     res4: u39,
 
-    pub fn get() CR4 {
+    pub inline fn get() CR4 {
         const address = asm volatile ("mov %cr4, %rax"
             : [ret] "={rax}" (-> u64),
         );
         return @bitCast(address);
     }
 
-    pub fn set(self: CR4) void {
+    pub inline fn set(self: CR4) void {
         const ival: u64 = @bitCast(self);
         asm volatile ("mov %rax, %cr4"
             :
@@ -196,7 +196,7 @@ pub const CpuFeatures = packed struct(u64) {
     pbe: bool,
 
     /// Querys all cpu features
-    pub fn get() CpuFeatures {
+    pub inline fn get() CpuFeatures {
         return asm volatile ("cpuid; shlq $32, %rdx; or %rdx, %rcx"
             : [ret] "={rcx}" (-> CpuFeatures),
             : [param] "{eax}" (1),
@@ -205,7 +205,7 @@ pub const CpuFeatures = packed struct(u64) {
     }
 };
 
-pub fn getIP() usize {
+pub inline fn getIP() usize {
     return asm volatile ("lea (%rip), %rax"
         : [ret] "={rax}" (-> usize),
     );
@@ -241,7 +241,7 @@ pub inline fn mask_legacy_pic() void {
     );
 }
 
-pub fn wait() void {
+pub inline fn wait() void {
     out(0x80, @as(u8, 0));
 }
 
@@ -273,13 +273,13 @@ pub inline fn out(port: u16, value: anytype) void {
 }
 
 /// Read from the specified i/o port. `ty` can be of size 1, 2, 4, or 8 bytes.
-pub fn in(port: u16, comptime ty: type) ty {
+pub inline fn in(port: u16, comptime ty: type) ty {
     switch (@sizeOf(ty)) {
-        1 => return asm ("inb %[reg], %[ret]"
+        1 => return asm volatile ("inb %[reg], %[ret]"
             : [ret] "=r" (-> ty),
             : [reg] "{dx}" (port),
         ),
-        2 => return asm ("inw %[reg], %[ret]"
+        2 => return asm volatile ("inw %[reg], %[ret]"
             : [ret] "=r" (-> ty),
             : [reg] "{dx}" (port),
         ),
@@ -290,7 +290,7 @@ pub fn in(port: u16, comptime ty: type) ty {
 }
 
 /// Flush the paging translation lookahead buffer
-pub fn flush_tlb() void {
+pub inline fn flush_tlb() void {
     asm volatile ("mov %cr3, %rax; mov %rax, %cr3");
 }
 
@@ -342,7 +342,7 @@ pub inline fn setMSR(register: u32, value: anytype) void {
     );
 }
 
-pub inline fn getMSR(register: u32, Value: type) Value {
+pub inline fn getMSR(register: u32, comptime Value: type) Value {
     if (@sizeOf(Value) != 8) {
         @compileError("Expected MSR value to be 64 bits wide!");
     }

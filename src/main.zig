@@ -34,19 +34,14 @@ pub fn readFile(comptime path: []const u8) []u8 {
         log.panic("Can't open file '{s}'", .{path}, @src());
     }
 
-    log.info("Hello 1", .{}, @src());
-
     var position = uefi.protocol.File.efi_file_position_end_of_file;
     _ = file.setPosition(position);
     _ = file.getPosition(&position);
     _ = file.setPosition(0);
-    log.info("Hello 2", .{}, @src());
 
-    // var buffer: []u8 = alloc.physical_page_allocator.alloc(u8, position) catch unreachable;
     if (file.read(&position, &RAMDISK) != .Success) {
         log.panic("Can't read file '{s}'", .{path}, @src());
     }
-    log.info("Hello 3", .{}, @src());
 
     return RAMDISK[0..position];
 }
@@ -66,6 +61,7 @@ pub const KERNEL: kernel_code() = .{ .code = KERNEL_CODE.* };
 pub fn main() uefi.Status {
     log.init();
 
+    // Read ramdisk from file system
     var filesystem_protocol_opt: ?*uefi.protocol.SimpleFileSystem = undefined;
     if (uefi.system_table.boot_services.?.locateProtocol(&uefi.protocol.SimpleFileSystem.guid, null, @ptrCast(&filesystem_protocol_opt)) != .Success) {
         return .Aborted;
@@ -78,7 +74,6 @@ pub fn main() uefi.Status {
     }
 
     const ramdisk = readFile("ramdisk");
-    log.info("Hello 4", .{}, @src());
 
     switch (alloc.initMemoryMap()) {
         .Success => {},

@@ -28,7 +28,10 @@ pub fn build(b: *std.build.Builder) void {
     exe.pie = false;
     exe.force_pic = false;
     exe.code_model = .medium;
+    // exe.ver
+    // b.verbose_llvm_ir = "out.ll";
     // exe.step.dependOn(&install_ramdisk_step.step);
+    // exe.llvm
 
     // exe.addAnonymousModule("ramdisk", .{ .source_file = ramdisk_step.getOutput() });
 
@@ -87,8 +90,8 @@ pub fn build(b: *std.build.Builder) void {
         "-m",
         "1024M",
 
-        "-device",
-        "virtio-mouse-pci",
+        // "-device",
+        // "virtio-mouse-pci",
 
         "-no-reboot",
 
@@ -106,6 +109,13 @@ pub fn build(b: *std.build.Builder) void {
     {
         const step = b.step("ramdisk", "Build ramdisk");
         step.dependOn(&install_ramdisk_step.step);
+    }
+
+    {
+        const step = b.step("kernel", "Build ramdisk");
+        step.dependOn(&exe.step);
+
+        b.verbose_llvm_ir = "out.ll";
     }
 
     {

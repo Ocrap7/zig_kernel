@@ -92,7 +92,6 @@ pub const PageTable align(4096) = struct {
 
     pub fn init(allocator: *std.mem.Allocator) !*PageTable {
         _ = allocator;
-
     }
 
     /// Sets the currently active page table (writes cr3 register).
@@ -342,14 +341,11 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
     const l3_index = (virtual >> 30) & 0x1FF;
     const l4_index = (virtual >> 39) & 0x1FF;
 
-    // log.info("Herep {} {} {} {}", .{ l4_index, l3_index, l2_index, l1_index }, @src());
     const l4_entry = PageTable.level4Entry(l4_index);
     if (l4_entry.flags.size != .small) return .{ .mapping = .L4 };
     if (!l4_entry.flags.present) {
-        // const new_addr = alloc.page_allocator.alignedAlloc(PageTable, 4096, 1) catch return .{ .allocate_page_table = .L4 };
         const new_addr = allocTable() catch return .{ .allocate_page_table = .L3 };
 
-        log.info("Poo", .{}, @src());
         // We can't go new_addr.* = .{} because the entry may not be mapped
         _ = mapTmpPage(@intFromPtr(new_addr));
         tmpPage().* = .{};
@@ -362,14 +358,11 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
 
     const l3_entry = PageTable.level3Entry(l4_index, l3_index);
     if (!l3_entry.flags.present) {
-        // const new_addr = alloc.page_allocator.alignedAlloc(PageTable, 4096, 1) catch return .{ .allocate_page_table = .L3 };
         const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
 
         // We can't go new_addr.* = .{} because the entry may not be mapped
         _ = mapTmpPage(@intFromPtr(new_addr));
         tmpPage().* = .{ .entries = [1]PageTableEntry{PageTableEntry{ .os_high = 45 }} ** PAGE_TABLE_ENTRIES };
-
-        // log.info("Alloc {x}", .{@intFromPtr(new_addr)}, @src());
 
         l3_entry.setAddress(@intFromPtr(new_addr));
         l3_entry.flags.present = true;
@@ -379,13 +372,9 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
         return .{ .not_small = .L3 };
     }
 
-    // log.info("Index {} {} {} {}", .{l4_index, l3_index, l2_index, l1_index}, @src());
     const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
     if (!l2_entry.flags.present) {
         const new_addr = allocTable() catch return .{ .allocate_page_table = .L1 };
-
-        // log.info("Poo Alloc {}", .{translateToPhysical(@intFromPtr(l2_entry))}, @src());
-        // log.info("Poo {}", .{l2_entry}, @src());
 
         // We can't go new_addr.* = .{} because the entry may not be mapped
         _ = mapTmpPage(@intFromPtr(new_addr));
@@ -400,7 +389,6 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
     }
 
     const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
-    // log.info("Entry {}", .{l1_entry}, @src());
     if (l1_entry.flags.present) return .{ .already_mapped = .L1 };
 
     l1_entry.setAddress(physical);
@@ -453,6 +441,43 @@ pub fn mapPage2MB(physical: usize, virtual: usize, flags: MappingFlags) PagingEr
     l2_entry.flags.size = .large;
 
     return .{ .success = physical };
+}
+
+/// Unmap the 2MB huge page at the given virtual address
+pub fn unmapPage(virtual: usize) PagingError {
+    const l1_index = (virtual >> 12) & 0x1FF;
+    const l2_index = (virtual >> 21) & 0x1FF;
+    const l3_index = (virtual >> 30) & 0x1FF;
+    const l4_index = (virtual >> 39) & 0x1FF;
+
+    const l4_entry = PageTable.level4Entry(l4_index);
+    if (!l4_entry.flags.present) {
+        return .{ .not_present = .L4 };
+    } else if (l4_entry.flags.size != .small) {
+        return .{ .not_small = .L4 };
+    }
+
+    const l3_entry = PageTable.level3Entry(l4_index, l3_index);
+    if (!l3_entry.flags.present) {
+        return .{ .not_present = .L3 };
+    } else if (l3_entry.flags.size != .small) {
+        return .{ .not_small = .L3 };
+    }
+
+    const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
+    if (!l2_entry.flags.present) {
+        return .{ .not_present = .L2 };
+    } else if (l2_entry.flags.size != .small) {
+        return .{ .not_small = .L2 };
+    }
+
+    const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
+    if (!l1_entry.flags.present) return .{ .not_present = .L1 };
+
+    const address = l1_entry.getAddress2MB();
+    l1_entry.* = .{};
+
+    return .{ .success = address };
 }
 
 /// Unmap the 2MB huge page at the given virtual address
@@ -520,12 +545,9 @@ pub fn mapPages(physical: usize, virtual: usize, count: usize, flags: MappingFla
     while (i < count) {
         switch (mapPage(physical + i * 4096, virtual + i * 4096, flags)) {
             .success => |_| {
-                // logger.*.?.writer().print("Mapped {x} {x}\n", .{physical + i * 4096, virtual + i * 4096}) catch {};
-                // logger.*.?.writer().print("Mapped {}\n", .{i}) catch {};
-
                 regs.flush_tlb();
             },
-            else => |err| log.panic("Error mapping pages: {}", .{err}, @src()),
+            else => return error.PagingError,
         }
         i += 1;
     }
@@ -586,6 +608,11 @@ pub fn remapKernel(from: *PageTable, into: *PageTable) void {
     alloc.remapKernelHeap(tmpPage(), into);
 }
 
+pub fn mapKernelExtra() void {
+    const acpi = @import("./acpi/acpi.zig");
+    acpi.map_memory() catch log.panic("Unable to map acpi memory!", .{}, @src());
+}
+
 pub fn mapKernel(code: []const u8) void {
     for (KERNEL_HEADERS.constSlice()) |header| {
         const exe = header.p_flags & std.elf.PF_X > 0;
@@ -608,7 +635,6 @@ pub fn mapKernel(code: []const u8) void {
             log.panic("Error mapping kernel: {}", .{err}, @src());
         };
 
-        log.info("Mapped kernel page {x} {x} - {} {}", .{ header.p_offset, header.p_vaddr, header.p_memsz, flag_write }, @src());
     }
 
     const kernel_page_count: usize = config.KERNEL_STACK_LENGTH / 4096;

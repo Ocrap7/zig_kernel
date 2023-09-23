@@ -54,9 +54,12 @@ pub fn init(control_base: usize, virtual: usize) *Apic {
         log.warn("Attempted to set APIC base to non page aligned address 0x{x}", .{control_base}, @src());
     }
 
-    log.info("Local APIC initialize at base 0x{x:0>8}", .{control_base}, @src());
+    log.info("Local APIC initialize at base 0x{x:0>8}", .{control_base & 0xFFFFFFF000}, @src());
 
-    regs.setMSR(0x1B, (control_base & 0xFFFFFF0000) | 0x800); // IA32_APIC_BASE_MSR
+    // regs.setMSR(0x1B, (control_base & 0xFFFFFFF000) | 0x800); // IA32_APIC_BASE_MSR
+    // const val = regs.getMSR(0x1B, u64); // IA32_APIC_BASE_MSR
+    // log.info("APIC addr {x}", .{val}, @src());
+
     CPU_APIC = .{ .control_base = virtual };
 
     return &CPU_APIC;
