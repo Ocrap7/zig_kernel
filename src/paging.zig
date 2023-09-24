@@ -286,6 +286,7 @@ fn mapTmpPage(physical: usize) PagingError {
         const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
 
         l4_entry.setAddress(@intFromPtr(new_addr));
+        l4_entry.flags.writable = true;
         l4_entry.flags.present = true;
 
         const l3_entry = PageTable.level3Entry(l4_index, l3_index);
@@ -299,6 +300,7 @@ fn mapTmpPage(physical: usize) PagingError {
         const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
 
         l3_entry.setAddress(@intFromPtr(new_addr));
+        l3_entry.flags.writable = true;
         l3_entry.flags.present = true;
 
         const l2_entry = PageTable.level2Entry(l4_index, l3_index, l2_index);
@@ -314,6 +316,7 @@ fn mapTmpPage(physical: usize) PagingError {
         const new_addr = allocTable() catch return .{ .allocate_page_table = .L2 };
 
         l2_entry.setAddress(@intFromPtr(new_addr));
+        l2_entry.flags.writable = true;
         l2_entry.flags.present = true;
 
         const l1_entry = PageTable.level1Entry(l4_index, l3_index, l2_index, l1_index);
@@ -351,6 +354,7 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
         tmpPage().* = .{};
 
         l4_entry.setAddress(@intFromPtr(new_addr));
+        l4_entry.flags.writable = true;
         l4_entry.flags.present = true;
 
         regs.flush_tlb();
@@ -365,6 +369,7 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
         tmpPage().* = .{ .entries = [1]PageTableEntry{PageTableEntry{ .os_high = 45 }} ** PAGE_TABLE_ENTRIES };
 
         l3_entry.setAddress(@intFromPtr(new_addr));
+        l3_entry.flags.writable = true;
         l3_entry.flags.present = true;
 
         regs.flush_tlb();
@@ -381,6 +386,7 @@ pub fn mapPage(physical: usize, virtual: usize, flags: MappingFlags) PagingError
         tmpPage().* = .{ .entries = [1]PageTableEntry{PageTableEntry{ .os_high = 69 }} ** PAGE_TABLE_ENTRIES };
 
         l2_entry.setAddress(@intFromPtr(new_addr));
+        l2_entry.flags.writable = true;
         l2_entry.flags.present = true;
 
         regs.flush_tlb();
@@ -414,6 +420,7 @@ pub fn mapPage2MB(physical: usize, virtual: usize, flags: MappingFlags) PagingEr
         new_addr.* = .{};
 
         l4_entry.setAddress(@intFromPtr(new_addr));
+        l4_entry.flags.writable = true;
         l4_entry.flags.present = true;
     } else if (l4_entry.flags.size != .small) {
         return .{ .not_small = .L4 };
@@ -426,6 +433,7 @@ pub fn mapPage2MB(physical: usize, virtual: usize, flags: MappingFlags) PagingEr
 
         l3_entry.setAddress(@intFromPtr(new_addr));
         l3_entry.flags = .{
+            .writable = true,
             .present = true,
         };
     } else if (l3_entry.flags.size != .small) {
@@ -617,25 +625,37 @@ pub fn mapKernel(code: []const u8) void {
     for (KERNEL_HEADERS.constSlice()) |header| {
         const exe = header.p_flags & std.elf.PF_X > 0;
         _ = exe;
-        const flag_write = header.p_flags & std.elf.PF_W > 0;
+        const flag_write = header.p_flags & std.elf.PF_W > 0 and header.p_filesz == header.p_memsz;
 
         var physical = &code[header.p_offset];
 
         // .bss section doesn't have file contents, so instead we allocate the amount of memory it requires
         if (header.p_filesz != header.p_memsz) {
-            const value = alloc.physical_page_allocator.alloc(u8, header.p_memsz) catch {
-                log.panic("No memory left!", .{}, @src());
-            };
+            
+            var i: u64 = 0;
+            while (i < header.p_memsz / 4096 + 1) {
+                const phys_addr = alloc.allocPage() orelse {
+                    log.panic("No memory left!", .{}, @src());
+                };
 
-            @memset(value, 0);
-            physical = @ptrCast(value);
+                _ = mapPage(@intFromPtr(phys_addr), header.p_vaddr + i * 4096, .{.writable = flag_write});
+
+                const ptrrr: [*]u8 = @ptrFromInt(header.p_vaddr  + i * 4096);
+                const value = ptrrr[0..4096];
+                @memset(value, 0);
+
+                i += 1;
+            }
+
+            continue;
+
         }
 
-        _ = mapPages(@intFromPtr(physical), header.p_vaddr, header.p_memsz / 4096 + 1, .{ .writable = flag_write }) catch |err| {
+        const sz = mapPages(@intFromPtr(physical), header.p_vaddr, header.p_memsz / 4096 + 1, .{ .writable = flag_write }) catch |err| {
             log.panic("Error mapping kernel: {}", .{err}, @src());
         };
-
-    }
+        log.warn("{x} -> {x} mapped {x} {x} pages", .{header.p_vaddr, header.p_vaddr + header.p_memsz, header.p_memsz, sz}, @src());
+    } 
 
     const kernel_page_count: usize = config.KERNEL_STACK_LENGTH / 4096;
 

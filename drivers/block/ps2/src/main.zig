@@ -6,8 +6,8 @@ comptime {
     _ = driver;
 }
 
-fn handler() bool {
-    kernel.name.kernel_func();
+fn handler(frame: *kernel.isr.ISRFrame) bool {
+    _ = frame;
     _ = kernel.regs.in(0x60, u8);
 
     return true;
@@ -15,7 +15,10 @@ fn handler() bool {
 
 export fn main() void {
     _ = kernel.isr.register_isr(1, handler);
+    const v = "ps2";
+    // kernel.task.yield();
 
-    while (true) {}
+    while (true) {
+        kernel.name.kernel_func(v.ptr, v.len);
+    }
 }
-

@@ -7,7 +7,7 @@ const std = @import("std");
 const log = @import("./logger.zig");
 
 const MAX_VECTORS: usize = 64;
-const VECTOR_OFFSET: u8 = 0x30;
+pub const VECTOR_OFFSET: u8 = 0x30;
 
 pub const EventError = error{
     NoIOApic,
@@ -44,7 +44,7 @@ pub const EventManager = struct {
     /// 4: 1
     /// 5: 1
     /// 6: 11
-    fn next_vector(self: *EventManager) u8 {
+    pub fn next_vector(self: *EventManager) u8 {
         while (self.last_vector < self.vectors[self.vector_index]) : (self.last_vector += 1) {
             var i: u8 = self.vector_index;
             while (i < MAX_VECTORS and self.vectors[i] >= self.last_vector) : (i += 1) {
@@ -65,7 +65,7 @@ pub const EventManager = struct {
     /// Register callaback `listener` on the specified irq pin.
     /// An idt vector is allocated and returned from the function.
     /// This vector is then set in the ioapic that contains the irq and enabled
-    /// 
+    ///
     /// The vector is returned on success
     pub fn register_listener(self: *EventManager, irq_pin: u16, listener: irq.IRQHandler) EventError!u8 {
         var offset: usize = 0;
@@ -95,7 +95,7 @@ pub const EventManager = struct {
                     const vector = self.next_vector();
 
                     io.enable_vector(vector + VECTOR_OFFSET, @truncate(irq_pin - value.gsi_base));
-                    irq.register_handler(listener, vector + VECTOR_OFFSET, irq_pin);
+                    irq.register_handler(listener, vector + VECTOR_OFFSET);
 
                     return vector;
                 },

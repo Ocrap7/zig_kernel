@@ -7,6 +7,9 @@ comptime {
 }
 
 export fn main() void {
-    kernel.name.kernel_func();
-    while (true) {}
+    const v = "ahci";
+
+    while (true) {
+        kernel.name.kernel_func(v.ptr, v.len);
+    }
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const uefi = @import("std").os.uefi;
 const regs = @import("./registers.zig");
+const log = @import("./logger.zig");
 const assert = std.debug.assert;
 
 pub const TSS = extern struct {
@@ -17,7 +18,17 @@ comptime {
     assert(@sizeOf(TSS) == 104);
 }
 
-const GLOBAL_TSS = TSS{};
+var GLOBAL_TSS = TSS{};
+
+const IST_VEC: u8 = 1;
+
+pub fn setInterruptIst(value: u64) void {
+    GLOBAL_TSS.ist[IST_VEC & 0b111 - 1] = value;
+}
+
+pub fn getIstInterruptVec() u8 {
+    return IST_VEC & 0b111;
+}
 
 pub const Access = packed struct(u8) {
     accessed: bool = false,
@@ -200,13 +211,11 @@ pub fn init_gdt() void {
         Entry.null_segment(), // 0x00
         Entry.kernel_code(), // 0x08
         Entry.kernel_data(), // 0x10
-
         Entry.null_segment(), // 0x18
         Entry.user_data(), // 0x20
         Entry.user_code(), // 0x28
-
         SystemEntry.tss().low(), // 0x30
-        Entry.null_segment(), // 0x38
+        SystemEntry.tss().high(), // 0x30
     };
 
     DESCRIPTOR = .{

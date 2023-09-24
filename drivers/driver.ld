@@ -15,10 +15,12 @@ SECTIONS {
 
 	.rodata ALIGN(4K) : AT (ADDR(.rodata) - DRIVER_ADDRR_OFFSET) {
 		*(.rodata)
+		*(.rodata.*)
 	} > DRIVER_MEM
 
 	.data ALIGN(4K) : AT (ADDR(.data) - DRIVER_ADDRR_OFFSET) {
 		*(.data)
+		*(.data.*)
 	} > DRIVER_MEM
 
 	.bss ALIGN(4K) : AT (ADDR(.bss) - DRIVER_ADDRR_OFFSET) {

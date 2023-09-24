@@ -78,8 +78,8 @@ pub fn warn(comptime format: []const u8, args: anytype, src: std.builtin.SourceL
     } else if (uefi.system_table.con_out) |out| {
         const logger = Logger{ .console = out };
 
-        _ = out.setAttribute(uefi.protocol.SimpleTextOutput.green);
-        logger.writer().print("{s}:{}: ", .{ src.file, src.line }) catch {};
+        _ = out.setAttribute(uefi.protocol.SimpleTextOutput.yellow);
+        logger.writer().print("{s}:{} WARN: ", .{ src.file, src.line }) catch {};
 
         _ = out.setAttribute(uefi.protocol.SimpleTextOutput.white);
         logger.writer().print(format, args) catch {};

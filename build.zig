@@ -14,6 +14,9 @@ pub fn build(b: *std.build.Builder) void {
     const install_ramdisk_step = b.addInstallFile(ramdisk_step.getOutput(), "ramdisk");
     install_ramdisk_step.step.dependOn(&ramdisk_step.step);
 
+    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .Debug });
+
+
     const exe = b.addExecutable(.{
         .name = "kernel",
         .root_source_file = .{ .path = "src/kernel.zig" },
@@ -22,18 +25,12 @@ pub fn build(b: *std.build.Builder) void {
             .os_tag = .freestanding,
             .abi = .none,
         },
-        .optimize = .Debug,
+        .optimize = optimize,
     });
     exe.linker_script = .{ .path = "link.ld" };
     exe.pie = false;
     exe.force_pic = false;
     exe.code_model = .medium;
-    // exe.ver
-    // b.verbose_llvm_ir = "out.ll";
-    // exe.step.dependOn(&install_ramdisk_step.step);
-    // exe.llvm
-
-    // exe.addAnonymousModule("ramdisk", .{ .source_file = ramdisk_step.getOutput() });
 
     {
         const objcopy_step = exe.addObjCopy(.{ .basename = "kernel" });
@@ -60,7 +57,7 @@ pub fn build(b: *std.build.Builder) void {
             .os_tag = Target.Os.Tag.uefi,
             .abi = Target.Abi.msvc,
         },
-        .optimize = .Debug,
+        .optimize = optimize,
     });
     bootloader.strip = false;
     bootloader.addAnonymousModule("kernel", .{ .source_file = exe.getOutputSource() });
@@ -71,6 +68,8 @@ pub fn build(b: *std.build.Builder) void {
         "-d",
         "-f",
         "zig-out/ramdisk",
+        "--size",
+        "40",
         // "-q", "../repos/qemu/build/x86_64-softmmu/qemu-system-x86_64",
         "--",
 

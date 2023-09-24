@@ -66,7 +66,7 @@ pub const IOApic = struct {
     base: usize,
 
     pub fn enable_vector(self: *IOApic, vector: u8, irq: u16) void {
-        const lapic_id = apic.cpuApic().read(.LapicId, u8);
+        const lapic_id = apic.instance().read(.LapicId, u8);
 
         self.write(.{ .Redirection = irq }, RedirectionEntry{
             .vector = vector,
@@ -146,7 +146,7 @@ pub fn init(base: usize, vector_offset: u8) IOApic {
     var ioapic = IOApic{ .base = base };
 
     const info = ioapic.read(.IOAPICVER, IOApic.Info);
-    const lapic_id = apic.cpuApic().read(.LapicId, u8);
+    const lapic_id = apic.instance().read(.LapicId, u8);
 
     for (0..info.max_entries + 1) |i| {
         ioapic.write(.{ .Redirection = @truncate(i) }, IOApic.RedirectionEntry{

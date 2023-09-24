@@ -65,7 +65,7 @@ pub const CR3 = packed struct {
         return @bitCast(address);
     }
 
-    pub fn set_address(addr: *u8) void {
+    pub inline fn set_address(addr: *u8) void {
         const cr3 = CR3{
             .low = .{ .pcid = 0 },
             .phys_addr = @truncate(@intFromPtr(addr) >> 12),
@@ -204,6 +204,12 @@ pub const CpuFeatures = packed struct(u64) {
         );
     }
 };
+
+pub inline fn getRSP() usize {
+    return asm volatile ("mov %rsp, %[ret]"
+        : [ret] "=r" (-> usize),
+    );
+}
 
 pub inline fn getIP() usize {
     return asm volatile ("lea (%rip), %rax"

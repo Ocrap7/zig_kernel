@@ -1,10 +1,12 @@
 const regs = @import("./registers.zig");
 const log = @import("./logger.zig");
+const events = @import("./events.zig");
 
 var CPU_APIC: Apic = undefined;
 
 const Apic = struct {
     control_base: usize = 0xFEE00000,
+    timer_vector: u8,
 
     pub const Register = enum(u16) {
         LapicId = 0x20,
@@ -40,7 +42,7 @@ const Apic = struct {
         return ptr.*;
     }
 
-    pub fn write(self: *Apic, register: Register, comptime value: anytype) void {
+    pub fn write(self: *Apic, register: Register, value: anytype) void {
         const ptr: *volatile @TypeOf(value) = @ptrFromInt(self.control_base + @as(usize, @intFromEnum(register)));
         ptr.* = value;
     }
@@ -60,16 +62,18 @@ pub fn init(control_base: usize, virtual: usize) *Apic {
     // const val = regs.getMSR(0x1B, u64); // IA32_APIC_BASE_MSR
     // log.info("APIC addr {x}", .{val}, @src());
 
-    CPU_APIC = .{ .control_base = virtual };
+    const vector = events.instance().next_vector() + events.VECTOR_OFFSET;
+
+    CPU_APIC = .{ .control_base = virtual, .timer_vector = vector };
 
     return &CPU_APIC;
 }
 
 pub fn setDefaultConfig() void {
-    var apic = cpuApic();
+    var apic = instance();
     apic.write(.SpuriousVector, @as(packed struct(u32) { offset: u8, enable: bool, _: u23 = 0 }, .{ .offset = 0xFF, .enable = true }));
 
-    apic.write(.LVTTimer, @as(u32, 0x20 | 0x20000));
+    apic.write(.LVTTimer, @as(u32, @as(u32, apic.timer_vector) | 0x20000));
     apic.write(.DivideConfiguration, @as(u32, 0xA));
     apic.write(.InitialCount, @as(u32, 0x00FFFFFF));
 
@@ -92,6 +96,6 @@ pub fn setDefaultConfig() void {
 }
 
 /// Returns a reference to the cpu's apic
-pub fn cpuApic() *Apic {
+pub fn instance() *Apic {
     return &CPU_APIC;
 }

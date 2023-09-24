@@ -33,7 +33,7 @@ export fn kernel_start(params: *const config.KernelParams) callconv(.C) noreturn
     while (true) {}
 }
 
-var RAMDISK: [1024 * 1024]u8 align(8) = undefined;
+var RAMDISK: [1024 * 1024 * 10]u8 align(8) = undefined;
 var RAMDISK_LEN: usize = undefined;
 
 fn ramdisk_code() []align(8) const u8 {
@@ -41,13 +41,14 @@ fn ramdisk_code() []align(8) const u8 {
 }
 
 fn kernel_main(params: *const config.KernelParams) !noreturn {
-   @memcpy(RAMDISK[0..params.ramdisk.len], params.ramdisk);
-    RAMDISK_LEN = params.ramdisk.len;
-
     gdt.init_gdt();
     irq.init_idt();
 
     log.set_kernel();
+
+    @memcpy(RAMDISK[0..params.ramdisk.len], params.ramdisk);
+    RAMDISK_LEN = params.ramdisk.len;
+
     devices.init_default();
 
     alloc.copyMemoryMap(params.memory_map, params.allocated); // We copy the memory map so that we can eventually (safely) unmap the bootloader pages
@@ -66,7 +67,7 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
     if (madt_opt == null) {
         log.panic("MADT not found in XSDT", .{}, @src());
     }
-    var arena = std.heap.ArenaAllocator.init(alloc.virtual_page_allocator);
+    var arena = std.heap.ArenaAllocator.init(alloc.kernel_page_allocator);
     var allocator = arena.allocator();
 
     {
@@ -129,9 +130,6 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
         }
     }
 
-    // _ = ev_mgr.register_listener(1, handlerpoo) catch log.panic("Unable to register listener", .{}, @src());
-    // while (true) {}
-
     schedular.init();
 
     const rd = ramdisk.RamDisk.fromBuffer(ramdisk_code());
@@ -153,29 +151,24 @@ fn kernel_main(params: *const config.KernelParams) !noreturn {
                 continue;
             };
 
-            const driver_task = task.Task.load_driver(driver_file.data) catch {
-                log.warn("Error loading driver \"{s}\". Skipping", .{stripped_line}, @src());
+            const driver_task = task.Task.load_driver(driver_file.data) catch |err| {
+                log.warn("Error loading driver \"{s}\" ({}). Skipping", .{stripped_line, err}, @src());
                 continue;
             };
 
-            schedular.schedular.addTask(driver_task);
+            schedular.instance().addTask(driver_task);
 
             log.info("Loaded driver \"{s}\"", .{stripped_line}, @src());
         }
-
-        // task.Task.load_driver(dconfig.data) catch log.panic("Unable to ", args: anytype, src: std.builtin.SourceLocation);
     } else {
         log.warn("Driver Config file not found in ramdisk", .{}, @src());
     }
 
+    gdt.setInterruptIst(regs.getRSP());
+
     regs.sti();
 
-    schedular.schedular.resetCurrent();
+    schedular.instance().resetCurrent();
 
     while (true) {}
-}
-
-fn handlerpoo() bool {
-    _ = regs.in(0x60, u8);
-    return true;
 }

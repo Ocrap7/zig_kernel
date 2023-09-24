@@ -6,6 +6,7 @@ const log = @import("./logger.zig");
 const paging = @import("./paging.zig");
 const gdt = @import("./gdt.zig");
 const apic = @import("./lapic.zig");
+const schedular = @import("./schedular.zig");
 
 const GateType = enum(u4) {
     Interrupt = 0xE,
@@ -48,6 +49,7 @@ const IDT align(16) = struct {
             .offset_high = @truncate(isr_val >> 16),
             .present = true,
             .selector = gdt.Entry.kernel_code_selector(),
+            .ist = @truncate(gdt.getIstInterruptVec()),
         };
     }
 };
@@ -55,6 +57,7 @@ const IDT align(16) = struct {
 var GLOBAL_IDT = IDT{};
 var IDT_DESCRIPTOR: packed struct { size: u16, base: u64 } = .{ .base = 0, .size = 0 };
 
+/// x86_64 interrupt frame along with saved registers
 pub const ISRFrame = extern struct {
     rdi: u64,
     rsi: u64,
@@ -63,9 +66,13 @@ pub const ISRFrame = extern struct {
     rbx: u64,
     rax: u64,
 
+    rbp: u64,
+
+    // We push these for useful information
     vector: u64,
     error_code: u64,
 
+    // These come from x86_64 interrupt specification
     rip: u64,
     cs: u64,
     rflags: u64,
@@ -73,10 +80,22 @@ pub const ISRFrame = extern struct {
     ss: u64,
 };
 
-pub const IRQHandler = *const fn () bool;
+/// Callback function called when an interrupt occurs
+pub const IRQHandlerCallback = *const fn (*ISRFrame) bool;
+
+/// Represents the configuration of an irq handler
+pub const IRQHandler = struct {
+    /// The callback to call
+    callback: IRQHandlerCallback,
+    /// If not null, this process's address space will be loaded. Then, the callback will be called
+    process: ?*schedular.List.Node,
+};
 
 var irq_handlers: [256]?std.ArrayList(IRQHandler) = .{null} ** 256;
 
+/// Handle/dispatch interrupt requests and exceptions.
+/// 
+/// See `irq.register_handler` and `irq.register_handler_callback` to register an interrupt handler
 export fn isr_handler(frame: *ISRFrame) callconv(.C) u64 {
     switch (frame.vector) {
         0x3 => {
@@ -119,7 +138,18 @@ export fn isr_handler(frame: *ISRFrame) callconv(.C) u64 {
 
             if (handler.*) |handlers| {
                 for (handlers.items) |hand| {
-                    if (hand()) {
+                    var old_proc: ?*schedular.List.Node = null;
+
+                    if (hand.process) |proc| {
+                        old_proc = schedular.instance().current_process;
+                        proc.data.context.address_space.load();
+                    }
+
+                    defer if (old_proc) |proc| {
+                        proc.data.context.address_space.load();
+                    };
+
+                    if (hand.callback(frame)) {
                         handled = true;
                         break;
                     }
@@ -130,7 +160,7 @@ export fn isr_handler(frame: *ISRFrame) callconv(.C) u64 {
                 log.warn("Unhandled interrupt 0x{x}", .{frame.ss}, @src());
             }
 
-            apic.cpuApic().write(.EOI, @as(u32, 0));
+            apic.instance().write(.EOI, @as(u32, 0));
         },
     }
     // frame.rflags &= ~@as(u64, 0x200);
@@ -157,79 +187,6 @@ const ICW4_BUF_SLAVE: u8 = 0x08;
 const ICW4_BUF_MASTER: u8 = 0x0C;
 const ICW4_SFNM: u8 = 0x10;
 
-// pub fn init2(xsdt: *const acpi.XSDT) void {
-//     if (regs.CpuFeatures.get().apic) log.panic("CPU does not support APIC", .{}, @src());
-
-//     regs.cli();
-//     regs.mask_legacy_pic();
-
-//     Apic.write(.SpuriousVector, @as(packed struct { offset: u8, enable: bool }, .{ .offset = 0xFF, .enable = true }));
-
-//     Apic.write(.LVTTimer, @as(u32, 32 | 0x20000));
-//     Apic.write(.DivideConfiguration, @as(u32, 0xB));
-//     Apic.write(.InitialCount, @as(u32, 10000000));
-
-//     Apic.write(.LVTPCINT, @as(u32, 0x10000));
-
-//     Apic.write(.LVTLINT0, @as(u32, 0x10000));
-//     Apic.write(.LVTLINT1, @as(u32, 0x10000));
-
-//     Apic.write(.ErrorStatus, @as(u32, 0));
-//     Apic.write(.ErrorStatus, @as(u32, 0));
-
-//     Apic.write(.EOI, @as(u32, 0));
-
-//     Apic.write(.IntCommandLow, @as(u32, 0x88500));
-//     Apic.write(.IntCommandHigh, @as(u32, 0x0));
-
-//     while (Apic.read(.IntCommandLow, u32) & 0x1000 != 0) {}
-
-//     Apic.write(.TaskPriority, @as(u32, 0));
-
-//     const madt = xsdt.madt() orelse log.panic("Unable to get madt from xsdt", .{}, @src());
-
-//     var apic_id: ?u8 = null;
-//     var ioapic_address: ?usize = null;
-
-//     const len = madt.length();
-//     var offset: usize = 0;
-//     while (offset < len) {
-//         const entry = madt.next_entry(offset);
-
-//         switch (entry) {
-//             .local_apic => |val| {
-//                 apic_id = val.apic_id;
-//                 log.writer().print("LocalApic@{}\n", .{val}) catch {};
-//             },
-//             .io_apic => |val| {
-//                 ioapic_address = val.io_apic_address;
-//                 log.writer().print("IOAPIC@{X}\n", .{val.io_apic_address}) catch {};
-//                 // break;
-//             },
-//             else => {},
-//         }
-
-//         offset += entry.len();
-//     }
-
-//     var ioapic = IOApic{ .base = ioapic_address.? };
-//     _ = ioapic;
-
-//     // ioapic.write(. { .Redirection = 0 }, IOApic.RedirectionEntry{
-//     //     .vector = 0x20,
-//     //     .destination = apic_id.?,
-//     //     .masked = true,
-//     // });
-
-//     // ioapic.write(. { .Redirection = 7 }, IOApic.RedirectionEntry{
-//     //     .vector = 0x27,
-//     //     .destination = apic_id.?,
-//     //     .masked = false,
-//     // });
-
-//     asm volatile ("int3");
-// }
-
 pub fn init_idt() void {
     init_idt_impl();
 
@@ -244,13 +201,32 @@ pub fn init_idt() void {
 
 const ioapic = @import("./ioapic.zig");
 
-pub fn register_handler(handler: IRQHandler, vector: u8, irq: u16) void {
-    _ = irq;
-    var allocator = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false }){};
-
-    if (irq_handlers[vector]) |_| {
-        irq_handlers[vector].?.append(handler) catch {};
+/// Register a simple callback function for `vector`
+pub fn register_handler_callback(handler: IRQHandlerCallback, vector: u8) void {
+    if (irq_handlers[vector]) |*vector_handler| {
+        vector_handler.append(.{
+            .callback = handler,
+            .process = null,
+        }) catch {};
     } else {
+        var allocator = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false }){};
+
+        irq_handlers[vector] = std.ArrayList(IRQHandler).init(allocator.allocator());
+        irq_handlers[vector].?.append(.{
+            .callback = handler,
+            .process = null,
+        }) catch {};
+    }
+}
+
+/// Register an interrupt handler for `vector`
+pub fn register_handler(handler: IRQHandler, vector: u8) void {
+
+    if (irq_handlers[vector]) |*vector_handler| {
+        vector_handler.append(handler) catch {};
+    } else {
+        var allocator = std.heap.GeneralPurposeAllocator(.{ .thread_safe = false, .safety = false }){};
+
         irq_handlers[vector] = std.ArrayList(IRQHandler).init(allocator.allocator());
         irq_handlers[vector].?.append(handler) catch {};
     }
@@ -516,13 +492,12 @@ fn init_idt_impl() void {
 }
 
 // TODO: Use callconv(.Interrupt) functions when they work
-
-
-
 comptime {
+    // isr_stub_next saves cpu state on stack which is used as an `irq.ISRFrame` pointer
     asm (
         \\.global isr_stub_next
         \\isr_stub_next:
+        \\    push %rbp  
         \\    push %rax   
         \\    push %rbx   
         \\    push %rcx   
@@ -530,7 +505,7 @@ comptime {
         \\    push %rsi   
         \\    push %rdi   
         \\    mov %rsp, %rdi
-        \\    pushq $0 // Align stack
+        // \\    pushq $0 // Align stack
         \\    call isr_handler
         \\    mov %rax, %rsp
         \\    pop %rdi
@@ -539,6 +514,8 @@ comptime {
         \\    pop %rcx
         \\    pop %rbx
         \\    pop %rax  
+        \\    pop %rbp
+        //    account for the vector and dummy error code we pushed in `irq.isr_stub`
         \\    add $16, %rsp
         \\    iretq
     );
@@ -546,6 +523,7 @@ comptime {
     asm (
         \\.global isr_stub_next_err
         \\isr_stub_next_err:
+        \\    push %rbp  
         \\    push %rax   
         \\    push %rbx   
         \\    push %rcx   
@@ -553,7 +531,7 @@ comptime {
         \\    push %rsi   
         \\    push %rdi   
         \\    mov %rsp, %rdi
-        \\    pushq $0 // Align stack
+        // \\    pushq $0 // Align stack
         \\    call isr_handler
         \\    mov %rax, %rsp
         \\    pop %rdi
@@ -562,14 +540,20 @@ comptime {
         \\    pop %rcx
         \\    pop %rbx
         \\    pop %rax  
+        \\    pop %rbp
+        //    account for the vector we pushed in `irq.isr_stub_err`
         \\    add $8, %rsp
         \\    iretq
     );
 }
 
+/// Pushes vector number and dummy error code on stack.
+/// Interrupts are also cleared so we don't have to handle nested interrupts.
+/// 
+/// This should never be called directly and is jmped to in asm
 inline fn isr_stub(comptime vector: u64) void {
     asm volatile (
-        // Interrupts will be restored on iretq
+    // Interrupts will be restored on iretq
         \\cli
         \\pushq $0   
         \\pushq %[vector]
@@ -579,6 +563,10 @@ inline fn isr_stub(comptime vector: u64) void {
     );
 }
 
+/// Pushes vector number and on stack.
+/// Interrupts are also cleared so we don't have to handle nested interrupts.
+/// 
+/// This should never be called directly and is jmped to in asm
 inline fn isr_stub_err(comptime vector: u64) void {
     asm volatile (
         \\cli

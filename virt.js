@@ -1,5 +1,5 @@
 
-const virtual = 0x7FBFC8000000n
+const virtual = 0x0000200000800000n
 
 const offset = virtual & 0xFFFn;
 const l1_index = (virtual >> 12n) & 0x1FFn;
@@ -20,10 +20,10 @@ const errorCodes = [8, 10, 11, 12, 13, 14, 17, 30]
 //   }
 // }
 
-for (let i = 0; i < 256; i += 1) {
-    if (errorCodes.includes(i)) {
-        console.log(`fn isr${i}() callconv(.Naked) void { asm volatile ("cli; pushq %[vector]; jmp isr_stub_next" : : [vector] "n" (${i})); }`)
-    } else {
-        console.log(`fn isr${i}() callconv(.Naked) void { asm volatile ("cli; pushq $0; pushq %[vector]; jmp isr_stub_next" : : [vector] "n" (${i})); }`)
-    }
-}
+// for (let i = 0; i < 256; i += 1) {
+//     if (errorCodes.includes(i)) {
+//         console.log(`fn isr${i}() callconv(.Naked) void { asm volatile ("cli; pushq %[vector]; jmp isr_stub_next" : : [vector] "n" (${i})); }`)
+//     } else {
+//         console.log(`fn isr${i}() callconv(.Naked) void { asm volatile ("cli; pushq $0; pushq %[vector]; jmp isr_stub_next" : : [vector] "n" (${i})); }`)
+//     }
+// }

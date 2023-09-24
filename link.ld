@@ -9,14 +9,17 @@ SECTIONS {
 
 	.text ALIGN(4K) : AT (ADDR(.text) - KERNEL_ADDR_OFFSET) {
 		*(.text)
+		*(.text.*)
 	}
 
-	.rodata ALIGN(4K) : AT (ADDR(.rodata) - KERNEL_ADDR_OFFSET) {
+	.rodata ALIGN(8K) : AT (ADDR(.rodata) - KERNEL_ADDR_OFFSET) {
 		*(.rodata)
+		*(.rodata.*)
 	}
 
 	.data ALIGN(4K) : AT (ADDR(.data) - KERNEL_ADDR_OFFSET) {
 		*(.data)
+		*(.data.*)
 	}
 
 	.bss ALIGN(4K) : AT (ADDR(.bss) - KERNEL_ADDR_OFFSET) {

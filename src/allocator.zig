@@ -226,7 +226,7 @@ fn alloc(_: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
     const offset = used_desc.physical_start + mapped_pages.offset * 4096;
 
     mapped_pages.offset += pages;
-    
+
     return @ptrFromInt(offset);
 }
 
@@ -259,8 +259,25 @@ pub const virtual_vtable = std.mem.Allocator.VTable{
     .free = virtual_free,
 };
 
-pub const virtual_page_allocator = std.mem.Allocator{
-    .ptr = undefined,
+const VirtualConfig = struct {
+    kernel: bool,
+};
+
+var process_allocator_config = VirtualConfig{
+    .kernel = false
+};
+
+var kernel_allocator_config = VirtualConfig{
+    .kernel = true
+};
+
+pub const process_page_allocator = std.mem.Allocator{
+    .ptr = @ptrCast(&process_allocator_config),
+    .vtable = &virtual_vtable,
+};
+
+pub const kernel_page_allocator = std.mem.Allocator{
+    .ptr = @ptrCast(&kernel_allocator_config),
     .vtable = &virtual_vtable,
 };
 
@@ -273,13 +290,13 @@ pub fn remapKernelHeap(from: *paging.PageTable, into: *paging.PageTable) void {
 }
 
 pub fn allocVirtualPage() *anyopaque {
-    const base = if (schedular.schedular.current_process) |proc|
-        proc.data.heap_base
+    const base = if (schedular.instance().current_process) |proc|
+        proc.data.context.heap_base
     else
         @as(u64, kernel_heap);
 
-    if (schedular.schedular.current_process) |proc| {
-        proc.data.heap_base += 4096;
+    if (schedular.instance().current_process) |proc| {
+        proc.data.context.heap_base += 4096;
     } else {
         kernel_heap += 4096;
     }
@@ -287,18 +304,26 @@ pub fn allocVirtualPage() *anyopaque {
     return @ptrFromInt(base);
 }
 
-fn virtual_alloc(_: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
+fn virtual_alloc(vconfig_opaque: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
+    const vconfig: *VirtualConfig = @ptrCast(vconfig_opaque);
     _ = ra;
     _ = log2_align;
 
     const pages = (n - 1) / 4096 + 1;
-    const base = if (schedular.schedular.current_process) |proc|
-        proc.data.heap_base
+    const base = if (schedular.is_init() and !vconfig.kernel)
+        if (schedular.instance().current_process) |proc|
+            proc.data.context.heap_base
+        else
+            @as(u64, kernel_heap)
     else
         @as(u64, kernel_heap);
 
-    if (schedular.schedular.current_process) |proc| {
-        proc.data.heap_base += pages * 4096;
+    if (schedular.is_init() and !vconfig.kernel) {
+        if (schedular.instance().current_process) |proc| {
+            proc.data.context.heap_base += pages * 4096;
+        } else {
+            kernel_heap += pages * 4096;
+        }
     } else {
         kernel_heap += pages * 4096;
     }
@@ -312,7 +337,6 @@ fn virtual_alloc(_: *anyopaque, n: usize, log2_align: u8, ra: usize) ?[*]u8 {
         const res = paging.mapPage(@intFromPtr(physical), base + 4096 * i, .{ .writable = true });
         log.info("Page {}", .{res}, @src());
     }
-
 
     return @ptrFromInt(base);
 }
