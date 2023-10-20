@@ -1,8 +1,8 @@
 const std = @import("std");
 const CrossTarget = @import("std").zig.CrossTarget;
 const Target = @import("std").Target;
-const RamDisk = @import("./RamDisk.zig");
-const CodeStrip = @import("./CodeStrip.zig");
+const RamDisk = @import("./build/RamDisk.zig");
+const CodeStrip = @import("./build/CodeStrip.zig");
 
 const drivers = @import("./drivers/build.zig");
 const ramdisk = @import("./src/ramdisk.zig");
@@ -16,7 +16,6 @@ pub fn build(b: *std.build.Builder) void {
 
     const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .Debug });
 
-
     const exe = b.addExecutable(.{
         .name = "kernel",
         .root_source_file = .{ .path = "src/kernel.zig" },
@@ -27,7 +26,7 @@ pub fn build(b: *std.build.Builder) void {
         },
         .optimize = optimize,
     });
-    exe.linker_script = .{ .path = "link.ld" };
+    exe.linker_script = .{ .path = "build/link.ld" };
     exe.pie = false;
     exe.force_pic = false;
     exe.code_model = .medium;
@@ -113,8 +112,6 @@ pub fn build(b: *std.build.Builder) void {
     {
         const step = b.step("kernel", "Build ramdisk");
         step.dependOn(&exe.step);
-
-        b.verbose_llvm_ir = "out.ll";
     }
 
     {

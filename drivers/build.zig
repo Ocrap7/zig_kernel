@@ -1,5 +1,5 @@
 const std = @import("std");
-const RamDisk = @import("../RamDisk.zig");
+const RamDisk = @import("../build/RamDisk.zig");
 
 const drivers = [_][]const u8{
     "block/ich9-ahci",

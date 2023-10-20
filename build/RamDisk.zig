@@ -1,5 +1,5 @@
 const std = @import("std");
-const rd = @import("./src/ramdisk.zig");
+const rd = @import("../src/ramdisk.zig");
 const RamDisk = @This();
 
 const Step = std.Build.Step;
