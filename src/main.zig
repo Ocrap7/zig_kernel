@@ -1,6 +1,8 @@
 const std = @import("std");
 pub const os = @import("os.zig");
 
+const paging = @import("paging.zig");
+
 const PL011 = @import("drivers/pl011.zig").PL011;
 
 pub export const main_kernel_stack linksection(".bss") = [_]usize{0} ** (1024 * 1024);
@@ -50,9 +52,25 @@ fn kernel_main_handle_error() noreturn {
 }
 
 fn kernel_main() !void {
+    var reg = paging.MAIRegister{};
+    reg.setNormal(0, .{
+        .read = true,
+        .write = true,
+        .write_back = true,
+        .non_transient = true,
+    }, .{
+        .read = true,
+        .write = true,
+        .write_back = true,
+        .non_transient = true,
+    });
+    reg.setNormal(1, .{}, .{});
+    reg.setDevice(2, .nGnRE);
+    reg.setDevice(3, .nGnRE);
+    reg.apply();
+
     std.log.info("Hello", .{});
     std.log.debug("Hello", .{});
     std.log.warn("Hello", .{});
     std.log.err("Hello", .{});
-    @panic("Uhoh");
 }

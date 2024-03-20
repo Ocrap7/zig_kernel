@@ -1,0 +1,159 @@
+{
+  "main": {
+    "id": "35af27a505fe549e",
+    "type": "split",
+    "children": [
+      {
+        "id": "a4cbecac7c5f1e0a",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "ba3134cc953c6b1b",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Paging.md",
+                "mode": "source",
+                "source": false
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "8622b0cb02881908",
+    "type": "split",
+    "children": [
+      {
+        "id": "ef952f0483ab6c82",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "71b1b657d863f043",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical"
+              }
+            }
+          },
+          {
+            "id": "8f8fe3bc417b2c5a",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              }
+            }
+          },
+          {
+            "id": "9d952d750d5a23a3",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {}
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "9b2abdee6add134c",
+    "type": "split",
+    "children": [
+      {
+        "id": "47da84886375a8ee",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "235c237eaee89511",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "Paging.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              }
+            }
+          },
+          {
+            "id": "8b02af0ec5f7f4c1",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "Paging.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              }
+            }
+          },
+          {
+            "id": "2beda4d846a6ea09",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true
+              }
+            }
+          },
+          {
+            "id": "bfda589f8bbfba81",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "Paging.md"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false
+    }
+  },
+  "active": "ba3134cc953c6b1b",
+  "lastOpenFiles": [
+    "Screenshot 2024-03-19 at 9.15.08 PM.png",
+    "Screenshot 2024-03-19 at 9.14.24 PM.png",
+    "Screenshot 2024-03-19 at 9.08.08 PM.png",
+    "Screenshot 2024-03-19 at 9.07.06 PM.png",
+    "Screenshot 2024-03-19 at 9.04.42 PM.png",
+    "Paging.md",
+    "Welcome.md"
+  ]
+}
