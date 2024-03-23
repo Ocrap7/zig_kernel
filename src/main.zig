@@ -2,6 +2,7 @@ const std = @import("std");
 pub const os = @import("os.zig");
 
 const paging = @import("paging.zig");
+const device_tree = @import("device_tree.zig");
 
 const PL011 = @import("drivers/pl011.zig").PL011;
 
@@ -46,14 +47,17 @@ pub fn kernelLog(
 fn kernel_main_handle_error() noreturn {
     kernel_main() catch {
         const pl = PL011{};
-        _ = pl.writeFn("Error in kernel_main") catch {};
+        _ = pl.writeBytes("Error in kernel_main");
     };
     while (true) {}
 }
 
+extern const heap_base: opaque {};
+
 fn kernel_main() !void {
     var reg = paging.MAIRegister{};
-    reg.setNormal(0, .{
+    reg.setNormal(0, .{}, .{});
+    reg.setNormal(1, .{
         .read = true,
         .write = true,
         .write_back = true,
@@ -64,13 +68,41 @@ fn kernel_main() !void {
         .write_back = true,
         .non_transient = true,
     });
-    reg.setNormal(1, .{}, .{});
     reg.setDevice(2, .nGnRE);
     reg.setDevice(3, .nGnRE);
     reg.apply();
 
-    std.log.info("Hello", .{});
-    std.log.debug("Hello", .{});
-    std.log.warn("Hello", .{});
-    std.log.err("Hello", .{});
+    os.heap.init(@intFromPtr(&heap_base));
+    try paging.init();
+
+    const dtree = device_tree.DeviceTree.init();
+
+    std.log.info("Device Tree {x}", .{device_tree.device_tree});
+    std.log.info("Device Tree  bytes {*}", .{dtree.structs_table.ptr});
+
+    const p = paging.PageTableEntry(.@"4K"){ .table = .{ .attrs = 0, .address = 0 } };
+
+    std.log.info("{}", .{p.table});
+
+    // var tok_it = dtree.iterator();
+    // while (tok_it.next()) |tok| {
+    //     switch (tok) {
+    //         .begin_node => |nd| std.log.info("{s}", .{nd}),
+    //         .property => |nd| std.log.info("    {s} {any}", .{ nd.name, nd.data[0..@min(nd.data.len, 10)] }),
+    //         .end_node => std.log.info("", .{}),
+    //         else => std.log.info("Token {}", .{tok}),
+    //     }
+    // }
+
+    for (dtree.reserve_table) |ent| {
+        std.log.info("Reserve: {x}-{x}", .{ ent.address, ent.size });
+    }
+    // for (dtree.structs_table) |b| {
+    //     const val = std.mem.readIntBig(u32, @as(*const [4]u8, @ptrCast(&b)));
+    //     std.log.info("Device Tree  bytes {x} {} {c}", .{
+    //         val,
+    //         if ((val > 0 and val <= 4) or val == 9) @as(device_tree.TokenKind, @enumFromInt(val)) else .nop,
+    //         if (val <= 255) @as(u8, @truncate(val)) else 0,
+    //     });
+    // }
 }

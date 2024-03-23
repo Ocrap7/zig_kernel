@@ -47,7 +47,7 @@ pub const PL011 = struct {
         return .{ .context = .{} };
     }
 
-    fn writeBytes(self: PL011, bytes: []const u8) void {
+    pub fn writeBytes(self: PL011, bytes: []const u8) void {
         for (bytes) |c| {
             self.writeReg(PL011.Reg.DR, c);
             waitPL();

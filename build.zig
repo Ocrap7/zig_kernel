@@ -74,11 +74,12 @@ pub fn build(b: *std.Build) void {
 
         // System specs
         "-machine",
+        // "virt,virtualization=on,secure=on",
         "virt",
         "-cpu",
-        "cortex-a72",
-        "-m",
-        "1024M",
+        "cortex-a53",
+        // "-m",
+        // "1G",
 
         // "-device",
         // "virtio-mouse-pci",
