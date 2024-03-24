@@ -45,7 +45,7 @@ _start:
     //mrs      x0, mpidr_el1
     //msr      vmpidr_el2, x0
 
-    //msr vttbr_el2, xzr
+    //msr vttbr_el1, xzr
     //msr sctlr_el2, xzr
 
 

@@ -429,22 +429,22 @@ pub fn PageTable(comptime granule: Granule, comptime level: i8) type {
                 }
 
                 if (entry.isTable()) {
-                    try writer.print("table at {}\n", .{i});
+                    try writer.print("table at {} @{*}\n", .{i, self});
                     if (level < 3) {
                         const next: *const PageTable(granule, level + 1) = @ptrFromInt(entry.table.getAddress());
                         try next.print(writer, indent + 1);
                     }
                 } else if (entry.isBlock()) {
                     if (LEVEL == 1) {
-                        try writer.print("block at {} => {x}", .{ i, entry.block_l1.getAddress() });
+                        try writer.print("block at {} @{*} => {x}", .{ i, self, entry.block_l1.getAddress() });
                     } else if (LEVEL == 2) {
-                        try writer.print("block at {} => {x}", .{ i, entry.block_l2.getAddress() });
+                        try writer.print("block at {} @{*} => {x}", .{ i, self, entry.block_l2.getAddress() });
                     } else {
-                        try writer.print("block at {}", .{i});
+                        try writer.print("block at {} @{*}", .{i, self});
                     }
                     try writer.print("\n", .{});
                 } else if (entry.isPage()) {
-                    try writer.print("page at {} => {x}\n", .{ i, entry.page.getAddress() });
+                    try writer.print("page at {} @{*} => {x}\n", .{ i, self, entry.page.getAddress() });
                 }
             }
         }
@@ -535,11 +535,12 @@ pub fn mapOnLevelRecursive(
                         return error.already_mapped;
                     }
 
-                    const empty_val = .{
+                    var empty_val = .{
                         .upper_attrs = options.upper_attrs,
                         .lower_attrs = options.lower_attrs,
                         .address = 0,
                     };
+                    empty_val.lower_attrs.access = true;
 
                     // 3 is the last level.
                     // We map pages on the last level
@@ -604,7 +605,6 @@ pub fn mapOnLevelInTable(
             inline while (i <= level) : (i += 1) {
                 const entry_count = comptime granule.entryCount(i);
                 const l_index = (address >> @as(u6, @intCast(((3 - i) * 9 + 12)))) & (entry_count - 1);
-                std.log.info("  level {} index: {}", .{ i, l_index });
                 const entry = &parent_table.entries[l_index];
 
                 if (i == level) {
@@ -613,11 +613,12 @@ pub fn mapOnLevelInTable(
                         return error.already_mapped;
                     }
 
-                    const empty_val = .{
+                    var empty_val = .{
                         .upper_attrs = options.upper_attrs,
                         .lower_attrs = options.lower_attrs,
                         .address = 0,
                     };
+                    empty_val.lower_attrs.access = true;
 
                     // 3 is the last level.
                     // We map pages on the last level
@@ -642,6 +643,14 @@ pub fn mapOnLevelInTable(
                     } else {
                         @compileError(std.fmt.comptimePrint("Shouldn't be here {}", .{i}));
                     }
+
+                    // asm volatile (
+                    //     \\tlbi vmalle1
+                    //     \\dsb sy
+                    //     \\isb
+                    // );
+
+                    return;
                 } else {
                     // Map next table
 
@@ -656,6 +665,12 @@ pub fn mapOnLevelInTable(
 
                     parent_table = @ptrFromInt(entry.table.getAddress());
                 }
+
+                // asm volatile (
+                //     \\tlbi vmalle1
+                //     \\dsb sy
+                //     \\isb
+                // );
             }
         },
         else => @compileError("Unimplemented"),
@@ -717,50 +732,6 @@ pub fn mapRangeInTable(
     }
 }
 
-test "mapp on level 3 with table" {
-    var allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer allocator.deinit();
-    var page_table: PageTable(.@"4K", 0) = .{};
-
-    // 0000 000001011 010010110 100101101 001011010 000000000000
-    // 0          0x0B     0x96     0x12D      0x5A
-    try mapOnLevelInTable(.@"4K", 3, allocator.allocator(), &page_table, .{ .lower_attrs = .{ .attr_index = 0 } }, 0x5A5A5A5A000, 0x6969000);
-
-    const level1 = page_table.nextLevel(0x0B);
-    try testing.expect(level1 != null and level1.? == .table);
-
-    const level2 = level1.?.table.nextLevel(0x96);
-    try testing.expect(level2 != null and level2.? == .table);
-
-    const level3 = level2.?.table.nextLevel(0x12D);
-    try testing.expect(level3 != null and level3.? == .table);
-
-    const page = level3.?.table.nextLevel(0x5A);
-    try testing.expect(page != null and page.? == 0x6969000);
-}
-
-test "mapp on level 2 with table" {
-    var allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer allocator.deinit();
-    var page_table: PageTable(.@"4K", 0) = .{};
-
-    // 0000 000001011 010010110 100101101 000000000 000000000000
-    // 0          0x0B     0x96     0x12D      0x00
-    try mapOnLevelInTable(.@"4K", 2, allocator.allocator(), &page_table, .{ .lower_attrs = .{ .attr_index = 0 } }, 0x5A5A5A00000, 0x6969000);
-
-    const level1 = page_table.nextLevel(0x0B);
-    try testing.expect(level1 != null and level1.? == .table);
-
-    const level2 = level1.?.table.nextLevel(0x96);
-    try testing.expect(level2 != null and level2.? == .table);
-
-    const block = level2.?.table.nextLevel(0x12D);
-    std.log.warn("\nl2 {?}\n", .{block});
-    try testing.expect(block != null and block.? == .addr and block.?.addr == 0x6969000);
-}
-
-var base_page_table: PageTable(.@"4K", 0) = .{};
-
 pub const TCR = packed struct(u64) {
     t0sz: u6,
     _res0: u1,
@@ -784,7 +755,7 @@ pub const TCR = packed struct(u64) {
     rest: u25,
 };
 
-extern var tt_l1_base: [512]u64;
+var base_page_table: PageTable(.@"4K", 0) align(4096) = .{};
 
 pub fn init() !void {
     asm volatile ("dsb sy");
@@ -814,14 +785,10 @@ pub fn init() !void {
     {
         var tcr: TCR = @bitCast(@as(u64, 0));
         tcr.ips = @truncate(mmfr0.parange);
-        // tcr.ips = 0b101;
-        // tcr.sh0 = 0b11;
-        // tcr.ogrn0 = 0b01;
-        // tcr.igrn0 = 0b01;
-        tcr.t0sz = 0x19;
-        // tcr.epd1 = 0b1;
-
-        // const tcr1: u64 = @as(u64, 0x405) | (@as(u64, 3) << 8);
+        tcr.sh0 = 0b11;
+        tcr.ogrn0 = 0b01;
+        tcr.igrn0 = 0b01;
+        tcr.t0sz = 16;
 
         asm volatile ("msr TCR_EL1, %[value]"
             :
@@ -830,8 +797,8 @@ pub fn init() !void {
         asm volatile ("isb");
     }
 
-    // const entry_size: u64 = (@as(u64, 2) << (48 - 1)) / base_page_table.entries.len;
-    // var addr: u64 = 0x40000000;
+    std.log.info("Table address {*}", .{&base_page_table});
+
     try mapRangeInTable(
         .@"4K",
         heap.physical_page_allocator,
@@ -846,54 +813,32 @@ pub fn init() !void {
         .@"4K",
         heap.physical_page_allocator,
         &base_page_table,
-        .{ .lower_attrs = .{ .attr_index = 1 } },
+        .{ .lower_attrs = .{ .attr_index = 0 } },
         0x40000000,
         0x40000000,
-        mb(4),
+        mb(20),
     );
     var writer = pl.PL011.writer();
     try base_page_table.print(writer, 0);
-    // base_page_table.entries[0] = .{
-    //     .block_l1 = .{
-    //         .upper_attrs = .{},
-    //         .address = 0,
-    //         .nT = 0,
-    //         .lower_attrs = .{ .access = true, .attr_index = 2 },
-    //     },
-    // };
 
-    // for (0..base_page_table.entries.len) |i| {
-    //     const address: u18 = @truncate(addr >> @bitOffsetOf(@TypeOf(base_page_table.entries[i].block_l1), "address"));
-    //     base_page_table.entries[i] = .{
-    //         .block_l1 = .{
-    //             .upper_attrs = .{},
-    //             .address = address,
-    //             .nT = 0,
-    //             .lower_attrs = .{ .access = true, .sh = 0, .ns = 0, .attr_index = 0 },
-    //         },
-    //     };
-
-    //     std.log.debug("Engtr {x} {}", .{ @as(u64, @bitCast(base_page_table.entries[i])), base_page_table.entries[i] });
-
-    //     addr += entry_size;
-    // }
     asm volatile (
         \\tlbi vmalle1
         \\dsb sy
         \\isb
     );
 
-    // var sctlr = asm ("mrs %[out], sctlr_el1"
-    //     : [out] "=r" (-> u64),
-    // );
     const sctlr: u64 = 0b1000000000101;
-    asm volatile ("msr sctlr_el1, %[value]"
+    asm volatile (
+        \\msr sctlr_el1, %[value]
         :
         : [value] "r" (sctlr),
     );
 
     asm volatile (
         \\isb
+        \\nop
+        \\nop
+        \\nop
     );
 }
 
@@ -921,4 +866,46 @@ test "Level entry" {
     try testing.expectEqual(@as(u64, 0xFFF9155445010), @as(u64, @intFromPtr(l34k1)));
     const l34k2 = levelEntry(.@"4K", 3, [_]u64{ 0xAA, 0x45, 0xAA, 0x45, 2 });
     try testing.expectEqual(@as(u64, 0xF551155445010), @as(u64, @intFromPtr(l34k2)));
+}
+
+test "map on level 3 with table" {
+    var allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer allocator.deinit();
+    var page_table: PageTable(.@"4K", 0) = .{};
+
+    // 0000 000001011 010010110 100101101 001011010 000000000000
+    // 0          0x0B     0x96     0x12D      0x5A
+    try mapOnLevelInTable(.@"4K", 3, allocator.allocator(), &page_table, .{ .lower_attrs = .{ .attr_index = 0 } }, 0x5A5A5A5A000, 0x6969000);
+
+    const level1 = page_table.nextLevel(0x0B);
+    try testing.expect(level1 != null and level1.? == .table);
+
+    const level2 = level1.?.table.nextLevel(0x96);
+    try testing.expect(level2 != null and level2.? == .table);
+
+    const level3 = level2.?.table.nextLevel(0x12D);
+    try testing.expect(level3 != null and level3.? == .table);
+
+    const page = level3.?.table.nextLevel(0x5A);
+    try testing.expect(page != null and page.? == 0x6969000);
+}
+
+test "map on level 2 with table" {
+    var allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer allocator.deinit();
+    var page_table: PageTable(.@"4K", 0) = .{};
+
+    // 0000 000001011 010010110 100101101 000000000 000000000000
+    // 0          0x0B     0x96     0x12D      0x00
+    try mapOnLevelInTable(.@"4K", 2, allocator.allocator(), &page_table, .{ .lower_attrs = .{ .attr_index = 0 } }, 0x5A5A5A00000, 0x6969000);
+
+    const level1 = page_table.nextLevel(0x0B);
+    try testing.expect(level1 != null and level1.? == .table);
+
+    const level2 = level1.?.table.nextLevel(0x96);
+    try testing.expect(level2 != null and level2.? == .table);
+
+    const block = level2.?.table.nextLevel(0x12D);
+    std.log.warn("\nl2 {?}\n", .{block});
+    try testing.expect(block != null and block.? == .addr and block.?.addr == 0x6969000);
 }

@@ -72,12 +72,13 @@ fn kernel_main() !void {
     reg.setDevice(3, .nGnRE);
     reg.apply();
 
+    std.log.info("Hello", .{});
     os.heap.init(@intFromPtr(&heap_base));
     try paging.init();
 
     const dtree = device_tree.DeviceTree.init();
 
-    std.log.info("Device Tree {x}", .{device_tree.device_tree});
+    std.log.info("Device Tree {}", .{device_tree.device_tree});
     std.log.info("Device Tree  bytes {*}", .{dtree.structs_table.ptr});
 
     const p = paging.PageTableEntry(.@"4K"){ .table = .{ .attrs = 0, .address = 0 } };
