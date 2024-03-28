@@ -1,6 +1,7 @@
 const std = @import("std");
 pub const os = @import("os.zig");
 
+const config = @import("./config.zig");
 const paging = @import("paging.zig");
 const device_tree = @import("device_tree.zig");
 
@@ -45,9 +46,9 @@ pub fn kernelLog(
 }
 
 fn kernel_main_handle_error() noreturn {
-    kernel_main() catch {
-        const pl = PL011{};
-        _ = pl.writeBytes("Error in kernel_main");
+    kernel_main() catch |e| {
+        var writer = PL011.writer();
+        writer.print("Error in kernel_main {}", .{e}) catch undefined;
     };
     while (true) {}
 }
@@ -72,9 +73,9 @@ fn kernel_main() !void {
     reg.setDevice(3, .nGnRE);
     reg.apply();
 
-    std.log.info("Hello", .{});
-    os.heap.init(@intFromPtr(&heap_base));
+    os.heap.preInit(@intFromPtr(&heap_base), config.HEAP_MAP_SIZE);
     try paging.init();
+    try os.heap.init(@intFromPtr(&heap_base));
 
     const dtree = device_tree.DeviceTree.init();
 

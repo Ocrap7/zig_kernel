@@ -1,22 +1,8 @@
 const std = @import("std");
 const heap = @import("./heap.zig");
 const pl = @import("./drivers/pl011.zig");
-
-pub fn kb(comptime value: anytype) @TypeOf(value) {
-    return value * 1024;
-}
-
-pub fn mb(comptime value: anytype) @TypeOf(value) {
-    return value * 1024 * 1024;
-}
-
-pub fn gb(comptime value: anytype) @TypeOf(value) {
-    return value * 1024 * 1024 * 1024;
-}
-
-pub fn tb(comptime value: anytype) @TypeOf(value) {
-    return value * 1024 * 1024 * 1024 * 1024;
-}
+const config = @import("./config.zig");
+const util = @import("./util.zig");
 
 pub const MAIRegister = struct {
     value: u64 = 0,
@@ -229,7 +215,9 @@ pub fn PageTableEntry(comptime granule: Granule) type {
         table: packed struct(u64) {
             valid: bool = true,
             ty: u1 = 0b1,
-            ignored2: u10 = 0,
+            ignored3: u8 = 0,
+            access: bool = true,
+            ignored2: u1 = 0,
             _res1: @Type(table_res_ty) = 0,
             address: @Type(table_adr_ty),
             _res0: u3 = 0,
@@ -343,7 +331,8 @@ pub fn levelEntry(comptime granule: Granule, comptime table_level: i8, indicies:
             } else if (indicies.len != normal_level and indicies.len != normal_level + 1) {
                 @compileError(std.fmt.comptimePrint("Expected {} or {} indicies for level {}", .{ normal_level, normal_level + 1, table_level }));
             }
-            const recursive_indicies = ([_]u64{comptime granule.entryCount(-1) - 1}) ++ [_]u64{comptime granule.entryCount(0) - 1} ** 4;
+            // const recursive_indicies = ([_]u64{comptime granule.entryCount(-1) - 1}) ++ [_]u64{comptime granule.entryCount(0) - 1} ** 4;
+            const recursive_indicies = ([_]u64{0}) ++ [_]u64{comptime granule.entryCount(0) - 1} ** 4;
 
             const all_indicies: [5]u64 = recursive_indicies[0..(5 - indicies.len + 1)].* ++ indicies[0 .. indicies.len - 1].*;
 
@@ -355,6 +344,8 @@ pub fn levelEntry(comptime granule: Granule, comptime table_level: i8, indicies:
     }
 }
 
+// 111111111 111111111 111111111 111111111 000000010000
+
 pub fn PageTable(comptime granule: Granule, comptime level: i8) type {
     const size = comptime granule.entryCount(level);
     const NextResult = if (level < 3) union(enum) { addr: usize, table: *const PageTable(granule, level + 1) } else usize;
@@ -365,6 +356,15 @@ pub fn PageTable(comptime granule: Granule, comptime level: i8) type {
 
         pub const LEVEL: i8 = level;
         const RECURSIVE_INDEX: usize = size - 1;
+
+        pub fn setRecursiveEntry(self: *@This()) !void {
+            const entry = &self.entries[RECURSIVE_INDEX];
+            if (entry.isValid())
+                return error.already_mapped;
+
+            entry.* = .{ .table = .{ .attrs = 0, .address = 0 } };
+            entry.table.setAddress(@intFromPtr(self) & ~@as(u64, 0xFFF));
+        }
 
         pub fn nextLevel(self: *const @This(), index: usize) ?NextResult {
             const entry = self.entries[index];
@@ -420,6 +420,7 @@ pub fn PageTable(comptime granule: Granule, comptime level: i8) type {
 
         pub fn print(self: *const @This(), writer: anytype, indent: usize) !void {
             var i: u64 = 0;
+            // try writer.print("\x1b[33mLooking at table {*}\x1b[0m\n", .{self});
             while (i < self.entries.len) : (i += 1) {
                 const entry = &self.entries[i];
                 if (!entry.isValid()) continue;
@@ -428,23 +429,27 @@ pub fn PageTable(comptime granule: Granule, comptime level: i8) type {
                     try writer.print("  ", .{});
                 }
 
-                if (entry.isTable()) {
-                    try writer.print("table at {} @{*}\n", .{i, self});
-                    if (level < 3) {
-                        const next: *const PageTable(granule, level + 1) = @ptrFromInt(entry.table.getAddress());
-                        try next.print(writer, indent + 1);
+                if (entry.isTable() and LEVEL != 3) {
+                    if (i == RECURSIVE_INDEX) {
+                        try writer.print("recursive page @{*}\n", .{entry});
+                    } else {
+                        try writer.print("table at {} @{*}\n", .{ i, entry });
+                        if (level < 3) {
+                            const next: *const PageTable(granule, level + 1) = @ptrFromInt(entry.table.getAddress());
+                            try next.print(writer, indent + 1);
+                        }
                     }
                 } else if (entry.isBlock()) {
                     if (LEVEL == 1) {
-                        try writer.print("block at {} @{*} => {x}", .{ i, self, entry.block_l1.getAddress() });
+                        try writer.print("block at {} @{*} => {x}", .{ i, entry, entry.block_l1.getAddress() });
                     } else if (LEVEL == 2) {
-                        try writer.print("block at {} @{*} => {x}", .{ i, self, entry.block_l2.getAddress() });
+                        try writer.print("block at {} @{*} => {x}", .{ i, entry, entry.block_l2.getAddress() });
                     } else {
-                        try writer.print("block at {} @{*}", .{i, self});
+                        try writer.print("block at {} @{*}", .{ i, entry });
                     }
                     try writer.print("\n", .{});
                 } else if (entry.isPage()) {
-                    try writer.print("page at {} @{*} => {x}\n", .{ i, self, entry.page.getAddress() });
+                    try writer.print("page at {} @{*} => {x}\n", .{ i, entry, entry.page.getAddress() });
                 }
             }
         }
@@ -504,19 +509,14 @@ pub fn mapOnLevelRecursive(
     comptime granule: Granule,
     comptime level: i8,
     physical_allocator: std.mem.Allocator,
-    table: anytype,
     options: PagingOptions,
     address: u64,
     physical: u64,
-) void {
-    const table_ty = std.meta.Child(@TypeOf(table));
+) !void {
     switch (granule) {
         .@"4K" => {
-            if (table_ty.LEVEL != -1 and table_ty.LEVEL != 0) {
-                @compileError("Expected level -1 or 0 table while mapping");
-            }
-            comptime var indicies: [5]u64 = undefined;
-            comptime var i: i8 = table_ty.LEVEL;
+            var indicies: [5]u64 = undefined;
+            comptime var i: i8 = 0;
 
             inline while (i <= level) : (i += 1) {
                 const entry_count = comptime granule.entryCount(i);
@@ -524,10 +524,10 @@ pub fn mapOnLevelRecursive(
                 indicies[i] = l_index;
             }
 
-            i = table_ty.LEVEL;
+            i = 0;
 
             inline while (i <= level) : (i += 1) {
-                const entry = levelEntry(granule, i, indicies[0 .. @max(0, i) + 1].*);
+                const entry = levelEntry(granule, i, indicies[0 .. @as(i8, @max(i, 0)) + 1].*);
 
                 if (i == level) {
                     // Map page or block
@@ -562,14 +562,12 @@ pub fn mapOnLevelRecursive(
                         };
 
                         entry.block_l2.setAddress(physical);
-                    } else {
-                        @compileError("Shouldn't be here");
-                    }
+                    } else unreachable;
                 } else {
                     // Map next table
 
                     if (!entry.isValid()) {
-                        const next_table = try physical_allocator.create(table_ty);
+                        const next_table = try physical_allocator.create(PageTable(granule, 0));
 
                         entry.* = .{ .table = .{ .attrs = 0, .address = 0 } };
                         entry.table.setAddress(@intFromPtr(next_table));
@@ -607,6 +605,7 @@ pub fn mapOnLevelInTable(
                 const l_index = (address >> @as(u6, @intCast(((3 - i) * 9 + 12)))) & (entry_count - 1);
                 const entry = &parent_table.entries[l_index];
 
+                // @TODO: Check if we should flush tlb. Probably not since we haven't loaded the root table yet.
                 if (i == level) {
                     // Map page or block
                     if (entry.isValid()) {
@@ -640,9 +639,7 @@ pub fn mapOnLevelInTable(
                         };
 
                         entry.block_l2.setAddress(physical);
-                    } else {
-                        @compileError(std.fmt.comptimePrint("Shouldn't be here {}", .{i}));
-                    }
+                    } else unreachable;
 
                     // asm volatile (
                     //     \\tlbi vmalle1
@@ -659,6 +656,7 @@ pub fn mapOnLevelInTable(
 
                         entry.* = .{ .table = .{ .attrs = 0, .address = 0 } };
                         entry.table.setAddress(@intFromPtr(next_table));
+                        try next_table.setRecursiveEntry();
                     } else if (!entry.isTable()) {
                         return error.already_mapped_to_block;
                     }
@@ -682,6 +680,55 @@ pub const PagingOptions = struct {
     upper_attrs: UpperAttributes = .{},
 };
 
+fn getLevelAndStep(comptime granule: Granule, length: u64) struct { i8, u64 } {
+    return switch (granule) {
+        .@"4K" => blk: {
+            std.debug.assert(length & 0xFFF == 0);
+            if (length / util.gb(1) > 0) {
+                break :blk .{ 1, util.gb(1) };
+            } else if (length / util.mb(2) > 0) {
+                break :blk .{ 2, util.mb(2) };
+            } else {
+                break :blk .{ 3, util.kb(4) };
+            }
+        },
+        else => @compileError("Unimplemented"),
+    };
+}
+
+pub fn mapRangeRecursively(
+    comptime granule: Granule,
+    physical_allocator: std.mem.Allocator,
+    options: PagingOptions,
+    virtual_start: u64,
+    physical_start: u64,
+    length: u64,
+) !void {
+    const level_and_step = getLevelAndStep(granule, length);
+
+    std.log.info("Allocating rec range {x} => {x} of {} bytes", .{ virtual_start, physical_start, length });
+    std.log.info("  Allocating rec on level {} with a step of {} bytes", .{ level_and_step[0], level_and_step[1] });
+
+    var offset: u64 = 0;
+    comptime var i = -1;
+    inline while (i <= 3) : (i += 1) {
+        if (level_and_step[0] == i) {
+            while (offset < length) : (offset += level_and_step[1]) {
+                try mapOnLevelRecursive(
+                    granule,
+                    i,
+                    physical_allocator,
+                    options,
+                    virtual_start + offset,
+                    physical_start + offset,
+                );
+            }
+
+            return;
+        }
+    }
+}
+
 pub fn mapRangeInTable(
     comptime granule: Granule,
     physical_allocator: std.mem.Allocator,
@@ -691,20 +738,7 @@ pub fn mapRangeInTable(
     physical_start: u64,
     length: u64,
 ) !void {
-    const table_ty = std.meta.Child(@TypeOf(table));
-    const level_and_step: struct { i8, u64 } = switch (granule) {
-        .@"4K" => blk: {
-            std.debug.assert(length & 0xFFF == 0);
-            if (length / gb(1) > 0) {
-                break :blk .{ 1, gb(1) };
-            } else if (length / mb(2) > 0) {
-                break :blk .{ 2, mb(2) };
-            } else {
-                break :blk .{ 3, kb(4) };
-            }
-        },
-        else => @compileError("Unimplemented"),
-    };
+    const level_and_step = getLevelAndStep(granule, length);
 
     std.log.info("Allocating range {x} => {x} of {} bytes", .{ virtual_start, physical_start, length });
     std.log.info("  Allocating on level {} with a step of {} bytes", .{ level_and_step[0], level_and_step[1] });
@@ -712,10 +746,9 @@ pub fn mapRangeInTable(
     var offset: u64 = 0;
     comptime var i = -1;
     inline while (i <= 3) : (i += 1) {
-        if ((i == -1 or i == 0) and table_ty.LEVEL == 0) continue;
-
         if (level_and_step[0] == i) {
             while (offset < length) : (offset += level_and_step[1]) {
+                // std.log.info("Map page {x} => {x}", .{virtual_start + offset, physical_start + offset});
                 try mapOnLevelInTable(
                     granule,
                     i,
@@ -757,7 +790,14 @@ pub const TCR = packed struct(u64) {
 
 var base_page_table: PageTable(.@"4K", 0) align(4096) = .{};
 
+pub fn debug_print_table() !void {
+    var writer = pl.PL011.writer();
+    try base_page_table.print(writer, 0);
+}
+
 pub fn init() !void {
+    try base_page_table.setRecursiveEntry();
+
     asm volatile ("dsb sy");
     const mmfr0 = asm ("mrs %[out], id_aa64mmfr0_el1"
         : [out] "=r" (-> packed struct(u64) {
@@ -784,7 +824,8 @@ pub fn init() !void {
 
     {
         var tcr: TCR = @bitCast(@as(u64, 0));
-        tcr.ips = @truncate(mmfr0.parange);
+        // tcr.ips = @truncate(mmfr0.parange);
+        tcr.ips = 0b101;
         tcr.sh0 = 0b11;
         tcr.ogrn0 = 0b01;
         tcr.igrn0 = 0b01;
@@ -806,8 +847,10 @@ pub fn init() !void {
         .{ .lower_attrs = .{ .attr_index = 2 } },
         0x0,
         0x0,
-        gb(1),
+        util.gb(1),
     );
+
+    std.log.info("Size: {x:0<8}", .{util.gb(1)});
 
     try mapRangeInTable(
         .@"4K",
@@ -816,10 +859,10 @@ pub fn init() !void {
         .{ .lower_attrs = .{ .attr_index = 0 } },
         0x40000000,
         0x40000000,
-        mb(20),
+        util.mb(20),
     );
+
     var writer = pl.PL011.writer();
-    try base_page_table.print(writer, 0);
 
     asm volatile (
         \\tlbi vmalle1
@@ -840,6 +883,8 @@ pub fn init() !void {
         \\nop
         \\nop
     );
+
+    try base_page_table.print(writer, 0);
 }
 
 const testing = std.testing;

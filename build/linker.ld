@@ -10,8 +10,8 @@ SECTIONS {
     .rodata : { *(.rodata .rodata.*) }
     .bss : { *(.bss COMMON) }
     . = ALIGN(8);
-    . += 0x1000; /* 4kB of stack memory */
+    . += 2m; /* 4kB of stack memory */
     stack_top = .;
-    . = ALIGN(64K);
+    . = ALIGN(64k);
     heap_base = .;
 }
